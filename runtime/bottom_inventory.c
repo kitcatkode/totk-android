@@ -1,4 +1,5 @@
-/* The bottom screen's Inventory tab (android/BOTTOM_SCREEN.md step D; 2026-10-23): the pouches as of the newest save.
+/* The bottom screen's Inventory tab (android/BOTTOM_SCREEN.md steps D and F): the running game's pouches
+   (gamedata_live.c, 1.4.3), else - another version, or the title screen, where they are empty - the newest save's.
    Included by bottom_screen.c after its drawing helpers. Read-only: the save is opened for reading and never changed.
 
    progress.sav is GameData (TotkMods/Research Formats/Sav): u32 magic 0x01020304, u32 version, u32 the data section's
@@ -34,6 +35,7 @@ static const struct { const char *tab, *key; inv_value v; } g_pouch[INV_POUCHES]
 typedef struct { char name[64], fuse[64]; int value; } inv_item;
 static struct { inv_item *it; int n; } g_inv[INV_POUCHES];
 static char g_inv_path[1700]; static time_t g_inv_time; static int g_inv_state;   /* 0 not read, 1 read, -1 no save */
+static int g_inv_live;   /* the pouches shown are the running game's (else the save's) */
 static int g_inv_tab, g_inv_scroll[INV_POUCHES];
 
 typedef struct { const uint8_t *b; size_t n; uint32_t doff; } sav;
@@ -73,11 +75,11 @@ static int newest_save(char *out, size_t outn, time_t *when) {
     closedir(users);
     *when = best; return best != 0;
 }
-static void inv_load(void) {   /* the bottom screen's thread: draws only, so no lock */
+static int inv_load_save(void) {   /* 1 when the pouches were replaced by a newer save's */
     char path[1700]; time_t when;
-    if (!newest_save(path, sizeof path, &when)) { if (!g_inv_state) g_inv_state = -1; return; }
-    if (g_inv_state == 1 && when == g_inv_time && !strcmp(path, g_inv_path)) return;
-    FILE *f = fopen(path, "rb"); if (!f) return;
+    if (!newest_save(path, sizeof path, &when)) { if (!g_inv_state) g_inv_state = -1; return 0; }
+    if (g_inv_state == 1 && when == g_inv_time && !strcmp(path, g_inv_path)) return 0;
+    FILE *f = fopen(path, "rb"); if (!f) return 0;
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *b = n > 0x20 && n < (64 << 20) ? malloc((size_t)n) : NULL;
     int ok = b && fread(b, 1, (size_t)n, f) == (size_t)n; fclose(f);
@@ -110,10 +112,52 @@ static void inv_load(void) {   /* the bottom screen's thread: draws only, so no 
     }
     free(b);
     if (ok) atomic_store(&g_reveal, found == MAP_REGIONS ? towers : MAP_ALL);
-    if (!ok) { for (int p = 0; p < INV_POUCHES; p++) free(it[p]); if (!g_inv_state) g_inv_state = -1; fprintf(stderr, "[bottom] inventory: %s not readable yet\n", path); return; }
+    if (!ok) { for (int p = 0; p < INV_POUCHES; p++) free(it[p]); if (!g_inv_state) g_inv_state = -1; fprintf(stderr, "[bottom] inventory: %s not readable yet\n", path); return 0; }
     for (int p = 0; p < INV_POUCHES; p++) { free(g_inv[p].it); g_inv[p].it = it[p]; g_inv[p].n = cnt[p]; }
     snprintf(g_inv_path, sizeof g_inv_path, "%s", path); g_inv_time = when; g_inv_state = 1;
     fprintf(stderr, "[bottom] inventory from %s: %d weapons, %d materials; towers %04x\n", path, g_inv[0].n, g_inv[5].n, (unsigned)atomic_load(&g_reveal));
+    return 1;
+}
+int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max);   /* gamedata_live.c */
+static int inv_live(void) {   /* the running game's pouches: 1 when read and not all empty */
+    enum { MAXS = 1024 };
+    static char names[MAXS][64], fuse[MAXS][64]; static int32_t vals[MAXS];
+    inv_item *it[INV_POUCHES] = {0}; int cnt[INV_POUCHES] = {0}, total = 0, ok = 1;
+    for (int p = 0; ok && p < INV_POUCHES; p++) {
+        char k[96]; int nn, nv = -1, nf;
+        snprintf(k, sizeof k, "Pouch.%s.Content.Name", g_pouch[p].key);
+        if ((nn = runtime_gmd_array(mm3(k), 17, names, MAXS)) < 0) { ok = 0; break; }
+        if (nn > MAXS) nn = MAXS;
+        if (g_pouch[p].v != V_NONE) {
+            snprintf(k, sizeof k, "Pouch.%s.Content.%s", g_pouch[p].key, g_pouch[p].v == V_LIFE ? "Life" : "StockNum");
+            nv = runtime_gmd_array(mm3(k), 3, vals, MAXS);
+        }
+        snprintf(k, sizeof k, "Pouch.%s.Content.Combined.Name", g_pouch[p].key);
+        nf = runtime_gmd_array(mm3(k), 17, fuse, MAXS);
+        it[p] = calloc(nn ? (size_t)nn : 1, sizeof **it);
+        for (int i = 0; it[p] && i < nn; i++) {
+            if (!names[i][0]) continue;
+            inv_item *x = &it[p][cnt[p]++];
+            memcpy(x->name, names[i], 63);
+            x->value = i < nv && i < MAXS ? vals[i] : INT32_MIN;
+            if (i < nf && i < MAXS) memcpy(x->fuse, fuse[i], 63);
+        }
+        total += cnt[p];
+    }
+    if (!ok || !total) { for (int p = 0; p < INV_POUCHES; p++) free(it[p]); return 0; }
+    for (int p = 0; p < INV_POUCHES; p++) { free(g_inv[p].it); g_inv[p].it = it[p]; g_inv[p].n = cnt[p]; }
+    return 1;
+}
+static void inv_load(void) {   /* the bottom screen's thread: draws only, so no lock */
+    static double last; double now = since_boot();
+    int from_save = inv_load_save();   /* the towers come from it either way */
+    if (!from_save && now - last < 1) return;
+    last = now;
+    int live = inv_live();
+    if (live != g_inv_live) fprintf(stderr, "[bottom] inventory: %s\n", live ? "the running game's pouches" : "the newest save's pouches");
+    if (live) g_inv_state = 1;
+    else if (g_inv_live && !from_save) { g_inv_time = 0; inv_load_save(); }   /* back to the title screen: the save again */
+    g_inv_live = live;
 }
 
 /* layout: pouch chips under the stats line; under them a grid of the game's icons (a tap picks an item) beside a panel
@@ -184,7 +228,8 @@ static void inv_draw(ANativeWindow_Buffer *b) {
     inv_detail(b, p, g_inv[p].n ? &g_inv[p].it[g_inv_sel[p]] : NULL, gx + INV_GRID_W + 12, gy + 4, b->width - PAD, gy + vis * INV_TILE - 4);
     char foot[160]; struct tm tm; localtime_r(&g_inv_time, &tm);
     int rows = (g_inv[p].n + INV_COLS - 1) / INV_COLS;
-    snprintf(foot, sizeof foot, "%d items   as of the last save, %02d:%02d%s", g_inv[p].n, tm.tm_hour, tm.tm_min, rows > vis ? "   swipe to scroll" : "");
+    if (g_inv_live) snprintf(foot, sizeof foot, "%d items   live%s", g_inv[p].n, rows > vis ? "   swipe to scroll" : "");
+    else snprintf(foot, sizeof foot, "%d items   as of the last save, %02d:%02d%s", g_inv[p].n, tm.tm_hour, tm.tm_min, rows > vis ? "   swipe to scroll" : "");
     b_rule(b, PAD, b->width - PAD, b->height - INV_FOOT + 4, g_col[C_ACCENT], 90);
     b_text(b, PAD, b->height - 20, foot, 28, g_col[C_DIM]);
 }

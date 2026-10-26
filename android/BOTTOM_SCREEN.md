@@ -125,6 +125,17 @@ Item ids are actor names (`Weapon_Sword_001`, `Item_Fruit_A`, ...); empty slots 
    in writable mappings) makes this a log-reading exercise for the agent. Once the layout is known it is likely the
    save format in memory (the save is written from it), version-independent apart from finding the table.
 
+   **Done (step F, 2026-10-26, 1.4.3 only): runtime/gamedata_live.c.** Found with `memscan` / `memdump`
+   (runtime/mem_scan.c, commands on input.txt) on the Thor. The layout differs from the save's: main+0x3ad66b0 holds
+   the GameData object (vtable main+0x39403b0); at +8, one 0x60-byte container per value type, numbered as in the save
+   (0 Bool with 0x53a6 keys, 3 IntArray, 17 String64Array); each has the values (+0x10), an open hash table of
+   `{u32 hash, u32 index}` (+0x18; slot hash % size, the next slot on a clash, hash 0 empty) and its count and size
+   (+0x20, +0x24). A value is an object (IntArray 0x40 bytes, String64Array 0x90) whose last four words are
+   `{count, the live array, count, another copy}`; a String64 element is 0x50 bytes with the text at +0xc. Every step
+   checks a vtable, so a different build reads nothing and the tab falls back to the save. The heap addresses were the
+   same in three runs, but nothing relies on that. The Inventory tab reads it once a second ("live" in the footer); on
+   the title screen the pouches are empty and the newest save is shown.
+
 ## 4. Item names and icons
 
 - **Names:** the message archive `Mals/USen.Product.<ver>.sarc.zs` (zstd with the zs dictionary, a SARC) holds MSBT
@@ -143,7 +154,7 @@ Item ids are actor names (`Weapon_Sword_001`, `Item_Fruit_A`, ...); empty slots 
 | C | Map tab with the real map imagery, three layers, pan / zoom, Link marker with heading | zstd, txtg reader, tile cache |
 | D | Inventory tab from the newest save: pouch tabs, counts, durability, names (ids first, then MSBT names) | sav reader |
 | E | Inventory icons | the icon files from B |
-| F | Inventory live from memory (no save lag) | memscan session, the table layout |
+| F | Inventory live from memory (no save lag) | done 2026-10-26 (gamedata_live.c, 1.4.3) |
 | G | Map extras: stamps from GameData, the revealed / unexplored state | GameData keys |
 
 A and D can start now; C and E wait on B (minutes of play with one setting on).

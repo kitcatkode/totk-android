@@ -56,7 +56,7 @@ endif
 
 RUNTIME_C := runtime/loader.c $(PATCHES) runtime/world_survey.c runtime/game_slot.c runtime/services.c runtime/romfs.c \
   runtime/threads.c runtime/hle_stack.c runtime/gfx_bridge.c runtime/account.c runtime/input.c runtime/hid_feedback.c \
-  runtime/motion_fusion.c runtime/autoload.c runtime/gfx_probe.c runtime/memory_probe.c runtime/shared_font.c runtime/ipc.c \
+  runtime/motion_fusion.c runtime/autoload.c runtime/gfx_probe.c runtime/memory_probe.c runtime/mem_scan.c runtime/gamedata_live.c runtime/shared_font.c runtime/ipc.c \
   runtime/audio_renderer.c runtime/audio_mixer.c runtime/audio_reverb.c runtime/audio_effects.c runtime/fs_host.c \
   runtime/opus_codec.c runtime/movie_host.c runtime/time_host.c runtime/applet_host.c runtime/swkbd_host.c \
   runtime/host_tp.c runtime/host_os.c $(if $(filter 1,$(APP)),runtime/frontend_android.c,runtime/frontend_headless.c)
