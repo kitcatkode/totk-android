@@ -118,9 +118,10 @@ static void inv_draw(ANativeWindow_Buffer *b) {
     inv_load();
     int cw = (b->width - 2 * PAD) / INV_POUCHES;
     for (int p = 0; p < INV_POUCHES; p++) {
-        int x0 = PAD + p * cw; uint32_t bg = p == g_inv_tab ? g_col[C_TAB] : g_col[C_PILL];
-        b_fill(b, x0 + 3, INV_CHIP_Y, x0 + cw - 3, INV_CHIP_Y + INV_CHIP_H, bg);
-        b_text(b, x0 + (cw - text_width(g_pouch[p].tab, 26)) / 2, INV_CHIP_Y + 42, g_pouch[p].tab, 26, g_col[C_TEXT]);
+        int x0 = PAD + p * cw, on = p == g_inv_tab;
+        b_panel(b, x0 + 4, INV_CHIP_Y, x0 + cw - 4, INV_CHIP_Y + INV_CHIP_H, 8, on ? g_col[C_TABOFF] : g_col[C_PILL], on ? g_col[C_TAB] : g_col[C_EDGE]);
+        if (on) b_cursor(b, x0 + 4, INV_CHIP_Y, x0 + cw - 4, INV_CHIP_Y + INV_CHIP_H, g_col[C_TAB]);
+        b_text(b, x0 + (cw - text_width(g_pouch[p].tab, 25)) / 2, INV_CHIP_Y + 41, g_pouch[p].tab, 25, on ? g_col[C_TEXT] : g_col[C_DIM]);
     }
     if (g_inv_state != 1) {
         const char *m = g_inv_state < 0 ? "No save yet" : "Reading the save..."; b_text(b, (b->width - text_width(m, 44)) / 2, b->height / 2, m, 44, g_col[C_DIM]);
@@ -133,7 +134,8 @@ static void inv_draw(ANativeWindow_Buffer *b) {
         int i = (g_inv_scroll[p] + r) * 2 + c; if (i >= g_inv[p].n) break;
         const inv_item *x = &g_inv[p].it[i];
         int x0 = PAD + c * colw, y0 = INV_LIST_Y + r * INV_ROW_H;
-        b_fill(b, x0 + 4, y0 + 3, x0 + colw - 4, y0 + INV_ROW_H - 3, g_col[C_ROW]);
+        b_panel(b, x0 + 4, y0 + 2, x0 + colw - 4, y0 + INV_ROW_H - 2, 8, g_col[C_ROW], g_col[C_EDGE]);
+        b_panel(b, x0 + 7, y0 + (INV_ROW_H - ICON_PX) / 2 - 3, x0 + 13 + ICON_PX, y0 + (INV_ROW_H + ICON_PX) / 2 + 3, 5, g_col[C_SLOT], g_col[C_EDGE]);   /* the icon's slot */
         char nm[200]; snprintf(nm, sizeof nm, "%s%s%s", item_name(x->name), x->fuse[0] ? " + " : "", x->fuse[0] ? item_name(x->fuse) : "");
         while (strlen(nm) > 4 && text_width(nm, 28) > colw - 150 - ICON_PX) {   /* shortened at a character's start */
             size_t k = strlen(nm) - 4; while (k && ((unsigned char)nm[k] & 0xc0) == 0x80) k--;
@@ -141,15 +143,16 @@ static void inv_draw(ANativeWindow_Buffer *b) {
         }
         const uint32_t *ic = item_icon(x->name);   /* the game's icon (bottom_assets.c) */
         if (ic) b_image(b, x0 + 10, y0 + (INV_ROW_H - ICON_PX) / 2, ic, ICON_PX, ICON_PX);
-        b_text(b, x0 + 20 + ICON_PX, y0 + 40, nm, 28, g_col[C_TEXT]);
+        b_text(b, x0 + 26 + ICON_PX, y0 + 40, nm, 28, g_col[C_TEXT]);
         char v[32] = "";
-        if (x->value != INT32_MIN && x->value >= 0) snprintf(v, sizeof v, g_pouch[p].v == V_LIFE ? "%d" : "x%d", x->value);
-        b_text(b, x0 + colw - 20 - text_width(v, 28), y0 + 40, v, 28, g_col[C_ACCENT]);
+        if (x->value != INT32_MIN && x->value >= 0) snprintf(v, sizeof v, g_pouch[p].v == V_LIFE ? "%d" : "×%d", x->value);
+        b_text(b, x0 + colw - 22 - text_width(v, 28), y0 + 40, v, 28, g_pouch[p].v == V_LIFE ? g_col[C_ACCENT] : g_col[C_TEXT]);
     }
     char foot[160]; struct tm tm; localtime_r(&g_inv_time, &tm);
     int rows = (g_inv[p].n + 1) / 2;
     snprintf(foot, sizeof foot, "%d items   as of the last save, %02d:%02d%s", g_inv[p].n, tm.tm_hour, tm.tm_min, rows > vis ? "   swipe to scroll" : "");
-    b_text(b, PAD, b->height - 20, foot, 30, g_col[C_DIM]);
+    b_rule(b, PAD, b->width - PAD, b->height - INV_FOOT + 4, g_col[C_ACCENT], 90);
+    b_text(b, PAD, b->height - 20, foot, 28, g_col[C_DIM]);
 }
 static void inv_tap(float x, float y, int width) {
     if (y < INV_CHIP_Y || y >= INV_CHIP_Y + INV_CHIP_H) return;

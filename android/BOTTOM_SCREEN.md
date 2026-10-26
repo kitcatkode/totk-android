@@ -167,6 +167,11 @@ larger than the 100 px overview is decoded from level 02 / 01 / 00 (00 kept at 1
 cache of 80 MB, the overview drawn meanwhile; the overview's builder records each tile's file version for the levels.
 Checked on the Thor with adb taps / swipes (double-tap, pan, follow); pinch needs fingers.
 Still open: the real reveal state (step G), the Depths' tint, the language.
+Look (2026-10-26): closer to the game's menus. Near-black panels with cut corners and an olive edge, cream text, gold
+for values, the selection in Zonai green with corner brackets and a soft glow, gold rules and diamonds as ornaments,
+and the text in the Switch's standard shared font (`extracted/firmware/shared-fonts/0-standard.bfttf`, decoded in
+memory; Roboto when it is missing). Text sizes are by the em scaled to Roboto's metrics, so the layout fits either font.
+Checked with a PC preview that draws the tabs from a real save and the game's icons and tiles (scratch tool, not in the repo).
 
 ## Sources
 

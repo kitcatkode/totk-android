@@ -132,20 +132,32 @@ static void map_draw(ANativeWindow_Buffer *b) {
     if (!img) b_text(b, (int)mx - text_width("Loading the map...", 36) / 2, (int)my, "Loading the map...", 36, g_col[C_DIM]);
     /* the bar: where Link is, and the buttons */
     b_fill(b, 0, vy1, b->width, b->height, g_col[C_BG]);
+    for (int k = 0; k < 4; k++) {   /* the map's frame: the corners cut off the map, then the edge */
+        float cx = k & 1 ? vx1 + 4 : vx0 - 4, cy = k & 2 ? vy1 + 4 : vy0 - 4, sx = k & 1 ? -1 : 1, sy = k & 2 ? -1 : 1;
+        b_tri(b, (float[]){cx, cx + sx * 12, cx}, (float[]){cy, cy, cy + sy * 12}, g_col[C_BG]);
+    }
+    b_panel(b, vx0 - 4, vy0 - 4, vx1 + 4, vy1 + 4, 10, 0, g_col[C_EDGE]);
     const char *bt[2] = {"Whole map", "Follow Link"}; int bx = b->width - PAD;
     for (int i = 1; i >= 0; i--) {
-        int w = text_width(bt[i], 30) + 40; bx -= w;
-        b_fill(b, bx, vy1 + 12, bx + w, b->height - 8, i == 1 && follow ? g_col[C_TAB] : g_col[C_PILL]);
-        b_text(b, bx + 20, b->height - 24, bt[i], 30, g_col[C_TEXT]); bx -= 12;
+        int w = text_width(bt[i], 30) + 40, on = i == 1 && follow; bx -= w;
+        b_panel(b, bx, vy1 + 14, bx + w, b->height - 8, 8, on ? g_col[C_TABOFF] : g_col[C_PILL], on ? g_col[C_TAB] : g_col[C_EDGE]);
+        if (on) b_cursor(b, bx, vy1 + 14, bx + w, b->height - 8, g_col[C_TAB]);
+        b_text(b, bx + 20, b->height - 22, bt[i], 30, on ? g_col[C_TEXT] : g_col[C_DIM]); bx -= 12;
     }
-    if (!have) { b_text(b, PAD, b->height - 24, "Link isn't in the world right now", 30, g_col[C_DIM]); return; }
+    if (!have) { b_text(b, PAD, b->height - 22, "Link isn't in the world right now", 30, g_col[C_DIM]); return; }
     float lx = SX(p[0]), ly = SY(p[2]), fx = sinf(yaw), fz = cosf(yaw);   /* forward on the map: (x, z) */
-    if (lx >= vx0 && lx < vx1 && ly >= vy0 && ly < vy1) {
-        float tx[3] = {lx + fx * 26, lx - fx * 12 + fz * 14, lx - fx * 12 - fz * 14}, ty[3] = {ly + fz * 26, ly - fz * 12 - fx * 14, ly - fz * 12 + fx * 14};
-        b_tri(b, tx, ty, g_col[C_WARN]);
+    if (lx >= vx0 && lx < vx1 && ly >= vy0 && ly < vy1) {   /* the game's marker: a gold arrowhead outlined in black */
+        for (int k = 1; k >= 0; k--) {
+            float s = k ? 1.35f : 1.0f, tx[3] = {lx + fx * 26 * s, lx + (-fx * 12 + fz * 15) * s, lx + (-fx * 12 - fz * 15) * s},
+                  ty[3] = {ly + fz * 26 * s, ly + (-fz * 12 - fx * 15) * s, ly + (-fz * 12 + fx * 15) * s};
+            b_tri(b, tx, ty, k ? g_col[C_SLOT] : g_col[C_ACCENT]);
+        }
     }
-    snprintf(line, sizeof line, "%s   x %.0f  y %.0f  z %.0f", p[1] < -100 ? "Depths" : p[1] > 1000 ? "Sky" : "Surface", p[0], p[1], p[2]);
-    b_text(b, PAD, b->height - 24, line, 30, g_col[C_TEXT]);
+    const char *ln = p[1] < -100 ? "Depths" : p[1] > 1000 ? "Sky" : "Surface";
+    b_diamond(b, PAD + 7, b->height - 33, 5, g_col[C_ACCENT]);
+    b_text(b, PAD + 26, b->height - 22, ln, 30, g_col[C_ACCENT]);
+    snprintf(line, sizeof line, "x %.0f   y %.0f   z %.0f", p[0], p[1], p[2]);
+    b_text(b, PAD + 26 + text_width(ln, 30) + 24, b->height - 22, line, 30, g_col[C_DIM]);
     #undef SX
     #undef SY
 }

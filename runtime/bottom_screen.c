@@ -4,8 +4,9 @@
    display, ANativeActivity_onCreate tells the two apart by the component name, and this file runs the alias: it draws
    into its own window (software, only when something changed, and once a second for the stats line) and takes its own
    input queue, where touch goes to the UI and every gamepad event to the game (handle_input), so the controller keeps
-   working whichever screen has focus. Text: stb_truetype (third_party/stb, public domain / MIT) with the system's
-   RobotoStatic-Regular.ttf. Included into frontend_android.c (its statics). TOTK_BOTTOM=0: no second screen.
+   working whichever screen has focus. Text: stb_truetype (third_party/stb, public domain / MIT) with the Switch's
+   standard shared font from the game folder (TOTK_SHARED_FONTS), else the system's RobotoStatic-Regular.ttf. Included
+   into frontend_android.c (its statics). TOTK_BOTTOM=0: no second screen.
 
    The Settings tab edits totk.env in the game folder (the game reads it at start): each row cycles its values on a
    tap. The frame generation rows also apply at once (settings_apply); a row whose saved value differs from the one the
@@ -161,14 +162,35 @@ static void settings_apply(void) {
 }
 
 /* ---------- drawing (software, into the window's buffer: RGBX bytes, so a pixel is 0xXXBBGGRR) ---------- */
+/* The look follows the game's menus: near-black panels with cut corners and a thin olive edge, cream text, gold for
+   values, the selection in Zonai green with corner brackets, and the Switch's own system font (the console's shared
+   font, which the game's menus use) when the game folder has it. */
 #define RGB(r, g, b) (0xff000000u | (uint32_t)(b) << 16 | (uint32_t)(g) << 8 | (uint32_t)(r))
-enum { C_BG = 0, C_BAR, C_TAB, C_TABOFF, C_ROW, C_TEXT, C_DIM, C_ACCENT, C_PILL, C_WARN, C_N };
-static const uint32_t g_col[C_N] = {RGB(18, 20, 26), RGB(30, 33, 42), RGB(70, 132, 220), RGB(44, 48, 60), RGB(28, 31, 40),
-                                     RGB(236, 238, 242), RGB(140, 146, 160), RGB(110, 170, 255), RGB(52, 58, 74), RGB(240, 180, 80)};
+enum { C_BG = 0, C_BAR, C_TAB, C_TABOFF, C_ROW, C_TEXT, C_DIM, C_ACCENT, C_PILL, C_WARN, C_EDGE, C_SLOT, C_N };
+static const uint32_t g_col[C_N] = {RGB(11, 13, 12), RGB(17, 20, 18), RGB(132, 232, 182), RGB(40, 46, 41), RGB(22, 26, 24),
+                                     RGB(238, 232, 212), RGB(146, 142, 124), RGB(222, 196, 124), RGB(30, 35, 32), RGB(236, 166, 78),
+                                     RGB(72, 80, 66), RGB(7, 9, 8)};
 static stbtt_fontinfo g_font; static unsigned char *g_font_data; static int g_font_ok = -1;
+/* the Switch's standard shared font: a BFTTF is a TrueType file XORed by 32-bit big-endian words with a key, after an
+   8-byte header (magic, size) under the same key; the key is what turns the first word into the magic */
+static unsigned char *bfttf_read(const char *path) {
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    unsigned char *d = n > 16 ? malloc((size_t)n) : NULL; int ok = d && fread(d, 1, (size_t)n, f) == (size_t)n; fclose(f);
+    #define BE32(p) ((uint32_t)(p)[0] << 24 | (uint32_t)(p)[1] << 16 | (uint32_t)(p)[2] << 8 | (p)[3])
+    uint32_t key = ok ? BE32(d) ^ 0x7f9a0218u : 0, size = ok ? BE32(d + 4) ^ key : 0;
+    if (!ok || size > (uint32_t)n - 8) { free(d); return NULL; }
+    for (uint32_t i = 0; i + 4 <= size; i += 4) { uint32_t v = BE32(d + 8 + i) ^ key; d[i] = v >> 24; d[i + 1] = v >> 16; d[i + 2] = v >> 8; d[i + 3] = v; }
+    #undef BE32
+    return d;
+}
 static void font_load(void) {
     if (g_font_ok >= 0) return;
     g_font_ok = 0;
+    const char *dir = getenv("TOTK_SHARED_FONTS"); char sp[1100] = "";
+    if (dir && (g_font_data = bfttf_read((snprintf(sp, sizeof sp, "%s/0-standard.bfttf", dir), sp))) &&
+        stbtt_InitFont(&g_font, g_font_data, stbtt_GetFontOffsetForIndex(g_font_data, 0))) { g_font_ok = 1; fprintf(stderr, "[bottom] font %s\n", sp); return; }
+    free(g_font_data); g_font_data = NULL;
     const char *paths[] = {"/system/fonts/RobotoStatic-Regular.ttf", "/system/fonts/Roboto-Regular.ttf", "/system/fonts/DroidSans.ttf"};
     for (unsigned i = 0; i < sizeof paths / sizeof *paths && !g_font_ok; i++) {
         FILE *f = fopen(paths[i], "rb"); if (!f) continue;
@@ -185,7 +207,8 @@ static glyph g_gl[512]; static int g_ngl;
 static const glyph *glyph_get(int ch, int size) {
     for (int i = 0; i < g_ngl; i++) if (g_gl[i].ch == ch && g_gl[i].size == size) return &g_gl[i];
     if (g_ngl == 512) return NULL;
-    glyph *g = &g_gl[g_ngl++]; float sc = stbtt_ScaleForPixelHeight(&g_font, (float)size); int adv, lsb;
+    glyph *g = &g_gl[g_ngl++]; float sc = stbtt_ScaleForMappingEmToPixels(&g_font, size / 1.17f);   /* by the em, so a size means the same in either font (Roboto: 1.17 em ascent to descent) */
+    int adv, lsb;
     g->size = size; g->ch = ch; g->bm = stbtt_GetCodepointBitmap(&g_font, sc, sc, ch, &g->w, &g->h, &g->xo, &g->yo);
     stbtt_GetCodepointHMetrics(&g_font, ch, &adv, &lsb); g->adv = (int)(adv * sc + 0.5f);
     return g;
@@ -221,6 +244,42 @@ static void b_text(ANativeWindow_Buffer *b, int x, int baseline, const char *s, 
         x += g->adv;
     }
 }
+static void b_blend(ANativeWindow_Buffer *b, int x0, int y0, int x1, int y1, uint32_t c, unsigned a) {   /* a: 0..255 */
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > b->width) x1 = b->width; if (y1 > b->height) y1 = b->height;
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = (uint32_t *)b->bits + (size_t)y * b->stride;
+        for (int x = x0; x < x1; x++) { uint32_t d = row[x], o = 0xff000000u; for (int k = 0; k < 24; k += 8) o |= (((c >> k & 255) * a + (d >> k & 255) * (255 - a)) / 255) << k; row[x] = o; }
+    }
+}
+/* the game's panel: cut corners, a 2-pixel edge (fill 0: the edge only) */
+static void b_panel(ANativeWindow_Buffer *b, int x0, int y0, int x1, int y1, int cut, uint32_t fill, uint32_t edge) {
+    for (int y = y0; y < y1; y++) {
+        int d = y - y0 < y1 - 1 - y ? y - y0 : y1 - 1 - y, in = d < cut ? cut - d : 0;
+        if (d < 2) { b_fill(b, x0 + in, y, x1 - in, y + 1, edge); continue; }
+        b_fill(b, x0 + in, y, x0 + in + 2, y + 1, edge); b_fill(b, x1 - in - 2, y, x1 - in, y + 1, edge);
+        if (fill) b_fill(b, x0 + in + 2, y, x1 - in - 2, y + 1, fill);
+    }
+}
+/* the game's selection: a soft glow round the box and brackets on its corners */
+static void b_cursor(ANativeWindow_Buffer *b, int x0, int y0, int x1, int y1, uint32_t c) {
+    for (int k = 1; k <= 6; k++) {
+        unsigned a = (unsigned)(48 / k);
+        b_blend(b, x0 - k, y0 - k, x1 + k, y0 - k + 1, c, a); b_blend(b, x0 - k, y1 + k - 1, x1 + k, y1 + k, c, a);
+        b_blend(b, x0 - k, y0 - k + 1, x0 - k + 1, y1 + k - 1, c, a); b_blend(b, x1 + k - 1, y0 - k + 1, x1 + k, y1 + k - 1, c, a);
+    }
+    enum { L = 16, T = 3 };
+    b_fill(b, x0, y0, x0 + L, y0 + T, c); b_fill(b, x0, y0, x0 + T, y0 + L, c);
+    b_fill(b, x1 - L, y0, x1, y0 + T, c); b_fill(b, x1 - T, y0, x1, y0 + L, c);
+    b_fill(b, x0, y1 - T, x0 + L, y1, c); b_fill(b, x0, y1 - L, x0 + T, y1, c);
+    b_fill(b, x1 - L, y1 - T, x1, y1, c); b_fill(b, x1 - T, y1 - L, x1, y1, c);
+}
+static void b_rule(ANativeWindow_Buffer *b, int x0, int x1, int y, uint32_t c, unsigned a) {   /* a line fading out at its ends */
+    int fade = (x1 - x0) / 5; if (fade < 1) fade = 1;
+    for (int x = x0; x < x1; x++) { int e = x - x0 < x1 - 1 - x ? x - x0 : x1 - 1 - x; b_blend(b, x, y, x + 1, y + 1, c, e >= fade ? a : a * (unsigned)e / (unsigned)fade); }
+}
+static void b_diamond(ANativeWindow_Buffer *b, int cx, int cy, int r, uint32_t c) {
+    for (int d = -r; d <= r; d++) { int w = r - (d < 0 ? -d : d); b_fill(b, cx - w, cy + d, cx + w + 1, cy + d + 1, c); }
+}
 /* layout (the window is 1240x1080) */
 enum { TAB_H = 110, STATS_H = 70, ROW_Y0 = TAB_H + STATS_H + 10, ROW_H = 104, ROW_GAP = 4, PAD = 32 };   /* 8 rows fit the 1080-pixel screen */
 static const char *g_tabs[] = {"Settings", "Map", "Inventory"};
@@ -247,14 +306,18 @@ static void bottom_draw(ANativeWindow *w) {
     if (ANativeWindow_lock(w, &b, NULL)) return;
     font_load();
     b_fill(&b, 0, 0, b.width, b.height, g_col[C_BG]);
-    /* tab bar */
+    /* tab bar: the chosen tab lit from below, a green line with a diamond under it, a gold rule along the bar */
     b_fill(&b, 0, 0, b.width, TAB_H, g_col[C_BAR]);
     int tw = b.width / 3;
     for (int i = 0; i < 3; i++) {
         int x0 = i * tw; uint32_t tc = i == g_tab ? g_col[C_TEXT] : g_col[C_DIM];
-        if (i == g_tab) b_fill(&b, x0 + 20, TAB_H - 8, x0 + tw - 20, TAB_H, g_col[C_TAB]);
+        if (i == g_tab) for (int y = TAB_H / 2; y < TAB_H; y++) b_blend(&b, x0, y, x0 + tw, y + 1, g_col[C_TAB], (unsigned)(y - TAB_H / 2) * 28 / (TAB_H / 2));
+        else if (i) b_fill(&b, x0, 34, x0 + 1, TAB_H - 34, g_col[C_EDGE]);
         b_text(&b, x0 + (tw - text_width(g_tabs[i], 44)) / 2, 70, g_tabs[i], 44, tc);
     }
+    b_rule(&b, 0, b.width, TAB_H - 1, g_col[C_ACCENT], 120);
+    { int x0 = g_tab * tw; b_rule(&b, x0 + 24, x0 + tw - 24, TAB_H - 2, g_col[C_TAB], 255); b_rule(&b, x0 + 24, x0 + tw - 24, TAB_H - 1, g_col[C_TAB], 255);
+      b_diamond(&b, x0 + tw / 2, TAB_H - 2, 9, g_col[C_BAR]); b_diamond(&b, x0 + tw / 2, TAB_H - 2, 6, g_col[C_TAB]); }
     /* stats: the game's frames a second (the presents counted by frontend_headless.c) and the pictures shown, generated
        ones included (the window's posts, android/gfx/vk_draw.c; weak, for a build without that backend) */
     { static uint64_t last_n, last_p, last_t; static double fps, shown;
@@ -265,18 +328,22 @@ static void bottom_draw(ANativeWindow *w) {
       if (fps <= 0.5) snprintf(s, sizeof s, "starting...");
       else if (shown > fps * 1.3) snprintf(s, sizeof s, "%.0f fps   %.0f shown with frame generation   %.1f ms a frame", fps, shown, 1000.0 / fps);
       else snprintf(s, sizeof s, "%.0f fps   %.1f ms a frame", fps, 1000.0 / fps);
-      b_text(&b, PAD, TAB_H + 48, s, 36, g_col[C_DIM]); }
+      b_diamond(&b, PAD + 7, TAB_H + 37, 5, g_col[C_ACCENT]);
+      b_text(&b, PAD + 26, TAB_H + 48, s, 32, g_col[C_DIM]); }
     if (g_tab == 0) {
         for (int i = 0; i < NSET; i++) {
             const b_setting *s = &g_set[i]; int y0 = ROW_Y0 + i * (ROW_H + ROW_GAP);
             if (y0 + ROW_H > b.height) break;
-            b_fill(&b, PAD, y0, b.width - PAD, y0 + ROW_H, g_col[C_ROW]);
-            b_text(&b, PAD + 28, y0 + 52, s->label, 38, g_col[C_TEXT]);
+            b_panel(&b, PAD, y0, b.width - PAD, y0 + ROW_H - 4, 12, g_col[C_ROW], g_col[C_EDGE]);
             int pending = s->run != s->sel;
-            b_text(&b, PAD + 28, y0 + 94, pending ? "applies after a restart" : "", 26, g_col[C_WARN]);
-            const char *v = s->name[s->sel]; int vw = text_width(v, 38), px1 = b.width - PAD - 28, px0 = px1 - vw - 56;
-            b_fill(&b, px0, y0 + 24, px1, y0 + ROW_H - 24, g_col[C_PILL]);
-            b_text(&b, px0 + 28, y0 + 70, v, 38, g_col[C_ACCENT]);
+            b_text(&b, PAD + 32, y0 + (pending ? 50 : 62), s->label, 36, g_col[C_TEXT]);
+            if (pending) b_text(&b, PAD + 32, y0 + 86, "applies after a restart", 26, g_col[C_WARN]);
+            /* the value between arrows: a tap steps to the next one */
+            const char *v = s->name[s->sel]; int vw = text_width(v, 36), ax = b.width - PAD - 34, my = y0 + (ROW_H - 4) / 2;
+            b_tri(&b, (float[]){ax, ax - 12, ax - 12}, (float[]){my, my - 9, my + 9}, g_col[C_ACCENT]);
+            b_text(&b, ax - 28 - vw, y0 + 62, v, 36, g_col[C_ACCENT]);
+            ax -= 44 + vw;
+            b_tri(&b, (float[]){ax - 12, ax, ax}, (float[]){my, my - 9, my + 9}, g_col[C_DIM]);
         }
     } else {
         if (g_tab == 1) map_draw(&b);
