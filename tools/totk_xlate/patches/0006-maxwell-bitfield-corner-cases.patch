@@ -1,0 +1,62 @@
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitBitfield.cs	2026-10-25 02:27:42.206899186 -0500
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitBitfield.cs	2026-10-25 02:27:57.672560911 -0500
+@@ -142,13 +142,24 @@
+ 
+             Operand size = context.BitfieldExtractU32(srcB, Const(8), Const(8));
+ 
++            // TOTK: Maxwell's corner cases. The position and size are 8-bit fields, so position + size can pass 32, where
++            // SPIR-V / GLSL bitfield extract is undefined. Maxwell clamps the size to the bits left above the position, and
++            // a position of 32 or more gives 0 (unsigned) or the sign bit (signed). NVIDIA and Apple GPUs happen to do the
++            // same; Adreno does not (the Depths terrain decodes its heights with positions up to 248: spiky ground).
++            EmitBitfieldClamp(context, position, size, out Operand outside, out Operand pos, out Operand len);
++
+             Operand res = isSigned
+-                ? context.BitfieldExtractS32(srcA, position, size)
+-                : context.BitfieldExtractU32(srcA, position, size);
++                ? context.BitfieldExtractS32(srcA, pos, len)
++                : context.BitfieldExtractU32(srcA, pos, len);
++
++            Operand empty = isSigned ? context.ShiftRightS32(srcA, Const(31)) : Const(0);
++
++            res = context.ConditionalSelect(context.ICompareEqual(len, Const(0)), Const(0), res);
++            res = context.ConditionalSelect(outside, empty, res);
+ 
+             context.Copy(GetDest(rd), res);
+ 
+-            // TODO: CC, X, corner cases.
++            // TODO: CC, X.
+         }
+ 
+         private static void EmitBfi(EmitterContext context, Operand srcA, Operand srcB, Operand srcC, int rd)
+@@ -157,11 +168,30 @@
+ 
+             Operand size = context.BitfieldExtractU32(srcB, Const(8), Const(8));
+ 
+-            Operand res = context.BitfieldInsert(srcC, srcA, position, size);
++            // TOTK: as in EmitBfe; outside 32 bits (or no bits) srcC is left as it is.
++            EmitBitfieldClamp(context, position, size, out Operand outside, out Operand pos, out Operand len);
++
++            Operand res = context.BitfieldInsert(srcC, srcA, pos, len);
++
++            res = context.ConditionalSelect(context.ICompareEqual(len, Const(0)), srcC, res);
++            res = context.ConditionalSelect(outside, srcC, res);
+ 
+             context.Copy(GetDest(rd), res);
+         }
+ 
++        // TOTK: a position below 32 and a size with position + size <= 32, as SPIR-V needs for every input, and whether the
++        // position was outside the 32 bits (then the size is 0 too).
++        private static void EmitBitfieldClamp(EmitterContext context, Operand position, Operand size, out Operand outside, out Operand pos, out Operand len)
++        {
++            outside = context.ICompareGreaterOrEqualUnsigned(position, Const(32));
++
++            pos = context.BitwiseAnd(position, Const(31));
++
++            Operand room = context.ISubtract(Const(32), context.IMinimumU32(position, Const(32)));
++
++            len = context.IMinimumU32(size, room);
++        }
++
+         private static void EmitFlo(EmitterContext context, Operand src, int rd, bool invert, bool sh, bool isSigned)
+         {
+             Operand srcB = context.BitwiseNot(src, invert);

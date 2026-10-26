@@ -1,0 +1,24 @@
+# build output and local tools (made by android/build_android.py and tools/totk_xlate/publish_native.sh)
+/prebuilt/
+/extracted/
+/rewritten/
+/rewritten-android/
+/build/
+/analysis/
+/tooling/
+/.venv/
+/user-data/
+__pycache__/
+*.pyc
+# device runs and captures (android/devrun.py)
+/runs/
+/shots/
+/passdump/
+*.log
+*.mp4
+# never commit game files, keys, firmware or Lossless.dll
+*.nsp
+*.nsz
+*.xci
+*.keys
+Lossless.dll

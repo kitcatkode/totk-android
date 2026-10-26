@@ -1,0 +1,3 @@
+/* libtotk.so exports only the NativeActivity entry point; everything else binds inside the library (the runtime's assembly
+   addresses its own symbols PC-relative, which a shared library allows only for symbols that cannot be preempted). */
+{ global: ANativeActivity_onCreate; local: *; };

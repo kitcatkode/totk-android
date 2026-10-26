@@ -1,0 +1,5 @@
+/* liblsfg.so exports only the C interface (lsfg_c.h); the static C++ library and volk stay inside */
+{
+  global: lsfg_init; lsfg_create; lsfg_present; lsfg_delete; lsfg_finalize;
+  local: *;
+};
