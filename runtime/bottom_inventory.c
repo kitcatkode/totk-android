@@ -103,17 +103,48 @@ static void inv_load(void) {   /* the bottom screen's thread: draws only, so no 
             if (fuse && i < nf) memcpy(x->fuse, fuse + i * 64, 63);
         }
     }
+    uint32_t towers = 0; int found = 0;   /* the Skyview Towers launched from: their regions show revealed on the map */
+    for (int n = 1; ok && n <= MAP_REGIONS; n++) {
+        char k[48]; uint32_t t, v; snprintf(k, sizeof k, "IsActivateCannon.Tower%02d", n);
+        if (sav_find(&s, mm3(k), &t, &v) && t == 0) { found++; if (v) towers |= 1u << (n - 1); }   /* section type 0: Bool, the value inline */
+    }
     free(b);
+    if (ok) atomic_store(&g_reveal, found == MAP_REGIONS ? towers : MAP_ALL);
     if (!ok) { for (int p = 0; p < INV_POUCHES; p++) free(it[p]); if (!g_inv_state) g_inv_state = -1; fprintf(stderr, "[bottom] inventory: %s not readable yet\n", path); return; }
     for (int p = 0; p < INV_POUCHES; p++) { free(g_inv[p].it); g_inv[p].it = it[p]; g_inv[p].n = cnt[p]; }
     snprintf(g_inv_path, sizeof g_inv_path, "%s", path); g_inv_time = when; g_inv_state = 1;
-    fprintf(stderr, "[bottom] inventory from %s: %d weapons, %d materials\n", path, g_inv[0].n, g_inv[5].n);
+    fprintf(stderr, "[bottom] inventory from %s: %d weapons, %d materials; towers %04x\n", path, g_inv[0].n, g_inv[5].n, (unsigned)atomic_load(&g_reveal));
 }
 
-/* layout: pouch chips under the stats line, then two columns of items, a footer with the save's time */
-enum { INV_CHIP_Y = ROW_Y0, INV_CHIP_H = 64, INV_LIST_Y = INV_CHIP_Y + INV_CHIP_H + 16, INV_ROW_H = 60, INV_FOOT = 56 };
-static int inv_rows_visible(int height) { return (height - INV_FOOT - INV_LIST_Y) / INV_ROW_H; }
-static int inv_max_scroll(int p, int height) { int rows = (g_inv[p].n + 1) / 2 - inv_rows_visible(height); return rows > 0 ? rows : 0; }
+/* layout: pouch chips under the stats line; under them a grid of the game's icons (a tap picks an item) beside a panel
+   with the picked item (its icon large, name, durability or count, fused material, the game's description); a footer
+   with the save's time */
+enum { INV_CHIP_Y = ROW_Y0, INV_CHIP_H = 64, INV_LIST_Y = INV_CHIP_Y + INV_CHIP_H + 16, INV_COLS = 7, INV_TILE = 112,
+       INV_ICON = 88, INV_BADGE = 40, INV_BIG = 176, INV_FOOT = 56, INV_GRID_W = INV_COLS * INV_TILE };
+static int g_inv_sel[INV_POUCHES];   /* the picked item per pouch */
+static int inv_rows_visible(int height) { return (height - INV_FOOT - INV_LIST_Y) / INV_TILE; }
+static int inv_max_scroll(int p, int height) { int rows = (g_inv[p].n + INV_COLS - 1) / INV_COLS - inv_rows_visible(height); return rows > 0 ? rows : 0; }
+static void inv_detail(ANativeWindow_Buffer *b, int p, const inv_item *x, int x0, int y0, int x1, int y1) {
+    b_panel(b, x0, y0, x1, y1, 14, g_col[C_ROW], g_col[C_EDGE]);
+    if (!x) return;
+    int cx = (x0 + x1) / 2, iy = y0 + 22;
+    b_panel(b, cx - INV_BIG / 2 - 16, iy - 8, cx + INV_BIG / 2 + 16, iy + INV_BIG + 8, 16, g_col[C_SLOT], g_col[C_EDGE]);   /* the icon's slot */
+    const uint32_t *ic = item_icon(x->name, INV_BIG); if (ic) b_image(b, cx - INV_BIG / 2, iy, ic, INV_BIG, INV_BIG);
+    int tx = x0 + 26, tw = x1 - x0 - 52, y = iy + INV_BIG + 56;
+    y = b_wrap(b, tx, y, tw, item_name(x->name), 34, g_col[C_TEXT], 40, y1 - 20) + 6;
+    char v[48] = "";
+    if (x->value != INT32_MIN && x->value >= 0) snprintf(v, sizeof v, g_pouch[p].v == V_LIFE ? "%d" : "×%d", x->value);
+    if (v[0]) { const char *l = g_pouch[p].v == V_LIFE ? "Durability" : "Owned"; b_text(b, tx, y, l, 26, g_col[C_DIM]); b_text(b, tx + text_width(l, 26) + 14, y, v, 26, g_col[C_ACCENT]); y += 38; }
+    if (x->fuse[0]) {   /* the fused material: its icon and name */
+        b_text(b, tx, y, "Fused", 26, g_col[C_DIM]); int fx = tx + text_width("Fused", 26) + 12;
+        const uint32_t *fi = item_icon(x->fuse, 32); if (fi) { b_image(b, fx, y - 25, fi, 32, 32); fx += 40; }
+        char f[120]; snprintf(f, sizeof f, "%s", item_name(x->fuse));
+        while (strlen(f) > 4 && text_width(f, 26) > x1 - 26 - fx) { size_t k = strlen(f) - 4; while (k && ((unsigned char)f[k] & 0xc0) == 0x80) k--; strcpy(f + k, "..."); }
+        b_text(b, fx, y, f, 26, g_col[C_ACCENT]); y += 38;
+    }
+    const char *cap = item_caption(x->name);
+    if (cap) { b_rule(b, tx, x1 - 26, y - 14, g_col[C_EDGE], 255); b_wrap(b, tx, y + 22, tw, cap, 24, g_col[C_DIM], 32, y1 - 16); }
+}
 static void inv_draw(ANativeWindow_Buffer *b) {
     inv_load();
     int cw = (b->width - 2 * PAD) / INV_POUCHES;
@@ -127,42 +158,51 @@ static void inv_draw(ANativeWindow_Buffer *b) {
         const char *m = g_inv_state < 0 ? "No save yet" : "Reading the save..."; b_text(b, (b->width - text_width(m, 44)) / 2, b->height / 2, m, 44, g_col[C_DIM]);
         return;
     }
-    int p = g_inv_tab, vis = inv_rows_visible(b->height), colw = (b->width - 2 * PAD) / 2;
+    int p = g_inv_tab, vis = inv_rows_visible(b->height), gx = PAD, gy = INV_LIST_Y;
     if (g_inv_scroll[p] > inv_max_scroll(p, b->height)) g_inv_scroll[p] = inv_max_scroll(p, b->height);
-    if (!g_inv[p].n) { const char *m = "Empty"; b_text(b, (b->width - text_width(m, 44)) / 2, INV_LIST_Y + 120, m, 44, g_col[C_DIM]); }
-    for (int r = 0; r < vis; r++) for (int c = 0; c < 2; c++) {
-        int i = (g_inv_scroll[p] + r) * 2 + c; if (i >= g_inv[p].n) break;
+    if (g_inv_sel[p] >= g_inv[p].n) g_inv_sel[p] = g_inv[p].n ? g_inv[p].n - 1 : 0;
+    if (!g_inv[p].n) { const char *m = "Empty"; b_text(b, gx + (INV_GRID_W - text_width(m, 44)) / 2, gy + 120, m, 44, g_col[C_DIM]); }
+    for (int r = 0; r < vis; r++) for (int c = 0; c < INV_COLS; c++) {
+        int i = (g_inv_scroll[p] + r) * INV_COLS + c; if (i >= g_inv[p].n) break;
         const inv_item *x = &g_inv[p].it[i];
-        int x0 = PAD + c * colw, y0 = INV_LIST_Y + r * INV_ROW_H;
-        b_panel(b, x0 + 4, y0 + 2, x0 + colw - 4, y0 + INV_ROW_H - 2, 8, g_col[C_ROW], g_col[C_EDGE]);
-        b_panel(b, x0 + 7, y0 + (INV_ROW_H - ICON_PX) / 2 - 3, x0 + 13 + ICON_PX, y0 + (INV_ROW_H + ICON_PX) / 2 + 3, 5, g_col[C_SLOT], g_col[C_EDGE]);   /* the icon's slot */
-        char nm[200]; snprintf(nm, sizeof nm, "%s%s%s", item_name(x->name), x->fuse[0] ? " + " : "", x->fuse[0] ? item_name(x->fuse) : "");
-        while (strlen(nm) > 4 && text_width(nm, 28) > colw - 150 - ICON_PX) {   /* shortened at a character's start */
-            size_t k = strlen(nm) - 4; while (k && ((unsigned char)nm[k] & 0xc0) == 0x80) k--;
-            strcpy(nm + k, "...");
+        int x0 = gx + c * INV_TILE + 4, y0 = gy + r * INV_TILE + 4, x1 = x0 + INV_TILE - 8, y1 = y0 + INV_TILE - 8, on = i == g_inv_sel[p];
+        b_panel(b, x0, y0, x1, y1, 8, on ? g_col[C_TABOFF] : g_col[C_ROW], on ? g_col[C_TAB] : g_col[C_EDGE]);
+        const uint32_t *ic = item_icon(x->name, INV_ICON);   /* the game's icon (bottom_assets.c) */
+        if (ic) b_image(b, x0 + (x1 - x0 - INV_ICON) / 2, y0 + (y1 - y0 - INV_ICON) / 2, ic, INV_ICON, INV_ICON);
+        else b_wrap(b, x0 + 8, y0 + 30, x1 - x0 - 16, item_name(x->name), 20, g_col[C_DIM], 22, y1 - 8);
+        const uint32_t *fi = x->fuse[0] ? item_icon(x->fuse, INV_BADGE - 4) : NULL;
+        if (fi) {   /* the fused material, small in the corner as in the game */
+            b_panel(b, x1 - INV_BADGE - 4, y1 - INV_BADGE - 4, x1, y1, 6, g_col[C_SLOT], g_col[C_EDGE]);
+            b_image(b, x1 - INV_BADGE - 2, y1 - INV_BADGE - 2, fi, INV_BADGE - 4, INV_BADGE - 4);
+        } else if (!x->fuse[0]) if (g_pouch[p].v == V_STOCK && x->value != INT32_MIN && x->value >= 0) {   /* the count, on a shade */
+            char v[16]; snprintf(v, sizeof v, "×%d", x->value); int w = text_width(v, 24);
+            b_blend(b, x1 - w - 14, y1 - 30, x1 - 3, y1 - 3, g_col[C_SLOT], 190);
+            b_text(b, x1 - w - 8, y1 - 9, v, 24, g_col[C_TEXT]);
         }
-        const uint32_t *ic = item_icon(x->name);   /* the game's icon (bottom_assets.c) */
-        if (ic) b_image(b, x0 + 10, y0 + (INV_ROW_H - ICON_PX) / 2, ic, ICON_PX, ICON_PX);
-        b_text(b, x0 + 26 + ICON_PX, y0 + 40, nm, 28, g_col[C_TEXT]);
-        char v[32] = "";
-        if (x->value != INT32_MIN && x->value >= 0) snprintf(v, sizeof v, g_pouch[p].v == V_LIFE ? "%d" : "×%d", x->value);
-        b_text(b, x0 + colw - 22 - text_width(v, 28), y0 + 40, v, 28, g_pouch[p].v == V_LIFE ? g_col[C_ACCENT] : g_col[C_TEXT]);
+        if (on) b_cursor(b, x0, y0, x1, y1, g_col[C_TAB]);
     }
+    inv_detail(b, p, g_inv[p].n ? &g_inv[p].it[g_inv_sel[p]] : NULL, gx + INV_GRID_W + 12, gy + 4, b->width - PAD, gy + vis * INV_TILE - 4);
     char foot[160]; struct tm tm; localtime_r(&g_inv_time, &tm);
-    int rows = (g_inv[p].n + 1) / 2;
+    int rows = (g_inv[p].n + INV_COLS - 1) / INV_COLS;
     snprintf(foot, sizeof foot, "%d items   as of the last save, %02d:%02d%s", g_inv[p].n, tm.tm_hour, tm.tm_min, rows > vis ? "   swipe to scroll" : "");
     b_rule(b, PAD, b->width - PAD, b->height - INV_FOOT + 4, g_col[C_ACCENT], 90);
     b_text(b, PAD, b->height - 20, foot, 28, g_col[C_DIM]);
 }
 static void inv_tap(float x, float y, int width) {
-    if (y < INV_CHIP_Y || y >= INV_CHIP_Y + INV_CHIP_H) return;
-    int p = (int)((x - PAD) / ((width - 2 * PAD) / INV_POUCHES));
-    if (p >= 0 && p < INV_POUCHES && p != g_inv_tab) { g_inv_tab = p; bottom_redraw(); }
+    if (y >= INV_CHIP_Y && y < INV_CHIP_Y + INV_CHIP_H) {
+        int p = (int)((x - PAD) / ((width - 2 * PAD) / INV_POUCHES));
+        if (p >= 0 && p < INV_POUCHES && p != g_inv_tab) { g_inv_tab = p; bottom_redraw(); }
+        return;
+    }
+    int c = (int)((x - PAD) / INV_TILE), r = (int)((y - INV_LIST_Y) / INV_TILE), p = g_inv_tab;
+    if (x < PAD || y < INV_LIST_Y || c >= INV_COLS || r >= inv_rows_visible(g_bwin ? ANativeWindow_getHeight(g_bwin) : 1080)) return;
+    int i = (g_inv_scroll[p] + r) * INV_COLS + c;
+    if (i < g_inv[p].n && i != g_inv_sel[p]) { g_inv_sel[p] = i; bottom_redraw(); }
 }
 static void inv_drag(float dy, int height) {   /* a swipe: rows scroll with the finger */
     static float acc; acc += dy;
-    int rows = (int)(acc / INV_ROW_H); if (!rows) return;
-    acc -= rows * INV_ROW_H;
+    int rows = (int)(acc / INV_TILE); if (!rows) return;
+    acc -= rows * INV_TILE;
     int p = g_inv_tab, s = g_inv_scroll[p] - rows, m = inv_max_scroll(p, height);
     if (s < 0) s = 0; if (s > m) s = m;
     if (s != g_inv_scroll[p]) { g_inv_scroll[p] = s; bottom_redraw(); }

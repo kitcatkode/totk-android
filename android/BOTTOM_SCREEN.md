@@ -166,12 +166,27 @@ Link" (keeps Link centred; a drag turns it off). From the whole map (~82 px a ti
 larger than the 100 px overview is decoded from level 02 / 01 / 00 (00 kept at 1500 px) on one thread into an LRU
 cache of 80 MB, the overview drawn meanwhile; the overview's builder records each tile's file version for the levels.
 Checked on the Thor with adb taps / swipes (double-tap, pan, follow); pinch needs fingers.
-Still open: the real reveal state (step G), the Depths' tint, the language.
+Still open: the language; the Depths' reveal (lightroots).
 Look (2026-10-26): closer to the game's menus. Near-black panels with cut corners and an olive edge, cream text, gold
 for values, the selection in Zonai green with corner brackets and a soft glow, gold rules and diamonds as ornaments,
 and the text in the Switch's standard shared font (`extracted/firmware/shared-fonts/0-standard.bfttf`, decoded in
 memory; Roboto when it is missing). Text sizes are by the em scaled to Roboto's metrics, so the layout fits either font.
 Checked with a PC preview that draws the tabs from a real save and the game's icons and tiles (scratch tool, not in the repo).
+Inventory grid (2026-10-26): the pouch as a grid of the game's icons, 7 across (the count on a shade, a fused material as
+a small badge), a tap picks an item; beside it the picked item: its icon large, name, durability or count, fused
+material, and the game's description (`<id>_Caption` in ActorMsg/PouchContent.msbt: 1360 of them).
+Depths (2026-10-26): the tiles' channels are relief (blue), gloom (magenta: red and blue over green) and a few features in
+their own colours; tinted as dark stone, maroon gloom, the features kept (`depths_tint`). The game's exact tint may differ.
+Reveal, step G (2026-10-26): the surface and the sky follow the newest save's Skyview Towers. GameData
+`IsActivateCannon.Tower01..15` (Bool) is the tower launched from; region n's outline is
+`UI/Map/MainFieldOpenMask/G_OpenMask_NN` (also S_, with _A / _B), a tile-aligned box at 135 px a tile (level 03's size).
+The boxes' places are not in any file found (the layout archives do not have them): they were found on the PC by
+matching each mask with the pixels that differ between tiles' T and F versions (scores 0.87..0.98, 117 of 120 tiles'
+letter counts reproduced), and are a table in bottom_assets.c (`g_mask_at`, region n -> tile column, row). A tile's
+letters are the masks over it, ascending (in every tile the matching could tell). The sky's tiles have the same letter
+counts (118 of 120), so the same regions. Region n = Tower n is assumed (region 1 is Lookout Landing's, where tower 1 is).
+The map bar's "Reveal all" shows the whole map. Sky tiles that come as `_A_A`.. take that over `_A` (the islands alone,
+which drew as a blue checkerboard).
 
 ## Sources
 

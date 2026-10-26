@@ -93,56 +93,136 @@ static void asset_scale(const uint32_t *src, int sw, int sh, uint32_t *dst, int 
 }
 
 /* ---------- the map: one picture per layer, every tile at level 02 scaled to MAP_TILE pixels ---------- */
-static void depths_grey(uint32_t *px, size_t n) {   /* the Depths tiles are masks the game tints: grey from their luma for now */
-    for (size_t i = 0; i < n; i++) { uint32_t c = px[i]; unsigned l = ((c & 255) * 77 + (c >> 8 & 255) * 150 + (c >> 16 & 255) * 29) >> 8; l = l * 3 / 5; px[i] = (c & 0xff000000u) | l | l << 8 | l << 16; }
+/* The Depths tiles are masks the game tints: grey-blue relief (blue channel), gloom as magenta (red and blue over green),
+   a few features in their own colours (mines, structures: brown). Tinted here as the game shows the Depths: the relief
+   in dark stone, the gloom in crimson, the features kept. */
+static void depths_tint(uint32_t *px, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        uint32_t c = px[i]; int r = c & 255, g = c >> 8 & 255, bl = c >> 16 & 255;
+        int lo = r < g ? r : g, hi = r > g ? r : g; if (bl < lo) lo = bl; if (bl > hi) hi = bl;
+        int l = (r + g + bl) / 3, sr = l * 160 >> 8, sg = l * 150 >> 8, sb = l * 136 >> 8;   /* the relief: warm stone */
+        int gloom = (r < bl ? r : bl) - g, out[3];
+        if (gloom > 24) {   /* crimson, as strong as the magenta, still shaded by the relief */
+            int k = gloom >= 104 ? 256 : (gloom - 24) * 256 / 80, d = 48 + bl / 3;
+            out[0] = ((d * 150 >> 8) * k + sr * (256 - k)) >> 8; out[1] = ((d * 34 >> 8) * k + sg * (256 - k)) >> 8; out[2] = ((d * 50 >> 8) * k + sb * (256 - k)) >> 8;
+        } else if (hi - lo > 40 && bl < hi) { out[0] = r * 4 / 5; out[1] = g * 4 / 5; out[2] = bl * 4 / 5; }   /* a feature: its own colour */
+        else { out[0] = sr; out[1] = sg; out[2] = sb; }
+        px[i] = (c & 0xff000000u) | (uint32_t)out[0] | (uint32_t)out[1] << 8 | (uint32_t)out[2] << 16;
+    }
 }
-enum { MAP_TILE = 100, MAP_COLS = 12, MAP_ROWS = 10 };
-static uint32_t *_Atomic g_mapimg[3]; static _Atomic int g_map_building[3];   /* 0 ground, 1 sky, 2 Depths */
-static char g_tile_suffix[3][MAP_COLS][MAP_ROWS][8];   /* the version found per tile ("_TT", "_T_A", "" for the Depths); set before g_mapimg */
-static const char *map_tile_suffix(int layer, int c, int r) {   /* NULL: no such tile (or the layer not built yet) */
-    if (!atomic_load(&g_mapimg[layer])) return NULL;
-    const char *s = g_tile_suffix[layer][c][r]; return s[0] == '!' ? NULL : s;
+enum { MAP_TILE = 100, MAP_COLS = 12, MAP_ROWS = 10, MAP_REGIONS = 15, MAP_ALL = (1 << MAP_REGIONS) - 1 };
+/* What is revealed (android/BOTTOM_SCREEN.md step G): a surface or sky tile's name has one letter per region it overlaps,
+   T revealed or F not, in ascending region order. Region n is Skyview Tower n's (GameData IsActivateCannon.TowerNN, read
+   with the inventory); its outline is UI/Map/MainFieldOpenMask/G_OpenMask_NN, cut to whole tiles (135 px a tile) and
+   placed at g_mask_at. The places were found on the PC by matching each mask with the pixels that change between the
+   tiles' T and F versions (every mask at least 87 % alike, 117 of the 120 tiles' letter counts reproduced; the sky has
+   the same regions per tile). A tile's letters are the regions whose masks cover most of it, as many as it has letters;
+   a letter none is found for (two sea tiles in the east) follows the tile's first. */
+static const signed char g_mask_at[MAP_REGIONS][2] = {{4, 3}, {1, 2}, {2, 0}, {6, 0}, {8, 0}, {6, 3}, {7, 2}, {3, 5},
+                                                       {0, 6}, {0, 4}, {7, 6}, {4, 0}, {4, 5}, {8, 5}, {0, 0}};
+static _Atomic uint32_t g_reveal = MAP_ALL;   /* bit n-1: region n revealed (the newest save's towers; all without one) */
+static _Atomic int g_reveal_all;              /* the map bar's "Reveal all" */
+static uint32_t map_reveal(void) { return atomic_load(&g_reveal_all) ? MAP_ALL : atomic_load(&g_reveal); }
+/* per layer (ground, sky), found by the first build: letters per tile (-1: no tile), the version ("", "_A_A", "_A": a
+   few tiles come only as _A / _B, before / after a change in the world, _A taken for now; a few sky tiles also as _A_A
+   .. _B_B, the whole tile, where their _A is the islands alone), each letter's region */
+static signed char g_tile_k[2][MAP_COLS][MAP_ROWS], g_tile_reg[2][MAP_COLS][MAP_ROWS][4]; static char g_tile_var[2][MAP_COLS][MAP_ROWS][6];
+static _Atomic int g_tiles_known[3];
+static int rom_exists(const char *path) {
+    char p[300]; uint64_t h; snprintf(p, sizeof p, "content:/%s", path);
+    if (runtime_romfs_open(&h, p, 1)) return 0;
+    runtime_romfs_close(h); return 1;
 }
+static void tiles_probe(int layer) {   /* the builder's thread, once per layer */
+    static int cover[MAP_REGIONS][MAP_COLS][MAP_ROWS];   /* each mask's pixels per tile; both layers use it: under the lock */
+    static int covered; static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    for (int r = 0; r < MAP_ROWS; r++) for (int c = 0; c < MAP_COLS; c++) {
+        g_tile_k[layer][c][r] = -1;
+        for (int k = 1; k <= 4 && g_tile_k[layer][c][r] < 0; k++) for (int v = 0; v < 3; v++) {
+            const char *var = (const char *[]){"", "_A_A", "_A"}[v]; char p[96];
+            snprintf(p, sizeof p, "UI/Map/MainField/%c_%02d-%02d_02_%.*s%s.bntx.zs", "GS"[layer], c, r, k, "TTTT", var);
+            if (rom_exists(p)) { g_tile_k[layer][c][r] = (signed char)k; snprintf(g_tile_var[layer][c][r], 6, "%s", var); break; }
+        }
+    }
+    pthread_mutex_lock(&mu);
+    for (int n = 0; !covered && n < MAP_REGIONS; n++) {
+        char p[96]; int w, h; snprintf(p, sizeof p, "UI/Map/MainFieldOpenMask/G_OpenMask_%02d.bntx.zs", n + 1);
+        uint32_t *m = asset_texture(p, &w, &h); if (!m) { fprintf(stderr, "[bottom] map: no %s\n", p); continue; }
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+            int c = g_mask_at[n][0] + x / 135, r = g_mask_at[n][1] + y / 135;
+            if (m[(size_t)y * w + x] >> 24 > 128 && c >= 0 && c < MAP_COLS && r >= 0 && r < MAP_ROWS) cover[n][c][r]++;
+        }
+        free(m);
+    }
+    covered = 1;
+    for (int r = 0; r < MAP_ROWS; r++) for (int c = 0; c < MAP_COLS; c++) {
+        int k = g_tile_k[layer][c][r], got = 0; signed char *reg = g_tile_reg[layer][c][r]; int used[MAP_REGIONS] = {0};
+        for (; got < k; got++) {   /* the most covering masks first */
+            int best = -1; for (int n = 0; n < MAP_REGIONS; n++) if (!used[n] && cover[n][c][r] && (best < 0 || cover[n][c][r] > cover[best][c][r])) best = n;
+            if (best < 0) break;
+            used[best] = 1; reg[got] = (signed char)best;
+        }
+        for (int i = 1; i < got; i++) for (int j = i; j > 0 && reg[j] < reg[j - 1]; j--) { signed char t = reg[j]; reg[j] = reg[j - 1]; reg[j - 1] = t; }
+        for (int i = got; i < k; i++) reg[i] = -1;
+    }
+    pthread_mutex_unlock(&mu);
+    atomic_store(&g_tiles_known[layer], 1);
+}
+/* a tile's name after "<layer>_<c>-<r>_<level>" for what is revealed; NULL: no such tile (or not known yet) */
+static const char *map_tile_suffix(int layer, int c, int r, uint32_t reveal, char out[12]) {
+    if (layer == 2) { out[0] = 0; return atomic_load(&g_tiles_known[2]) ? out : NULL; }
+    if (!atomic_load(&g_tiles_known[layer])) return NULL;
+    int k = g_tile_k[layer][c][r]; if (k < 0) return NULL;
+    const signed char *reg = g_tile_reg[layer][c][r]; int first = reg[0] >= 0 ? reveal >> reg[0] & 1 : 1;
+    out[0] = '_'; for (int i = 0; i < k; i++) out[1 + i] = (reg[i] >= 0 ? reveal >> reg[i] & 1 : first) ? 'T' : 'F';
+    snprintf(out + 1 + k, 12 - 1 - k, "%s", g_tile_var[layer][c][r]);
+    return out;
+}
+/* the whole-map pictures: built on a thread, again when what is revealed changes; the drawing thread takes a new one */
+static uint32_t *g_mapimg[3], *_Atomic g_mapimg_new[3]; static uint32_t g_map_shown[3]; static _Atomic uint32_t g_map_made[3];
+static _Atomic int g_map_building[3];   /* 0 ground, 1 sky, 2 Depths */
 static void *map_build(void *arg) {
     int layer = (int)(intptr_t)arg; static const char pre[3] = {'G', 'S', 'U'};
+    if (layer < 2 && !atomic_load(&g_tiles_known[layer])) tiles_probe(layer);
+    if (layer == 2) atomic_store(&g_tiles_known[2], 1);
+    uint32_t reveal = layer == 2 ? 0 : map_reveal();
     size_t W = MAP_COLS * MAP_TILE, H = MAP_ROWS * MAP_TILE; uint32_t *img = calloc(W * H, 4); int tiles = 0;
     for (int r = 0; img && r < MAP_ROWS; r++) for (int c = 0; c < MAP_COLS; c++) {
-        uint32_t *px = NULL; int w = 0, h = 0; char p[96];
-        char *suf = g_tile_suffix[layer][c][r];
-        if (layer == 2) { suf[0] = 0; snprintf(p, sizeof p, "UI/Map/MainField/U_%02d-%02d_02.bntx.zs", c, r); px = asset_texture(p, &w, &h); }
-        else for (int k = 1; k <= 4 && !px; k++) for (int v = 0; v < 3 && !px; v++) {
-            /* the fully revealed version: one T per region the tile overlaps; a few tiles come only as _A / _B (before /
-               after a change in the world: _A taken for now), the sky's also _A_A */
-            snprintf(suf, 8, "_%.*s%s", k, "TTTT", (const char *[]){"", "_A", "_A_A"}[v]);
-            snprintf(p, sizeof p, "UI/Map/MainField/%c_%02d-%02d_02%s.bntx.zs", pre[layer], c, r, suf);
-            px = asset_texture(p, &w, &h);
-        }
-        if (!px) { strcpy(suf, "!"); continue; }
+        char suf[12], p[96]; int w = 0, h = 0; uint32_t *px = NULL;
+        if (!map_tile_suffix(layer, c, r, reveal, suf)) continue;
+        snprintf(p, sizeof p, "UI/Map/MainField/%c_%02d-%02d_02%s.bntx.zs", pre[layer], c, r, suf);
+        if (!(px = asset_texture(p, &w, &h))) { fprintf(stderr, "[bottom] map: no %s\n", p); continue; }
         asset_scale(px, w, h, img + (size_t)r * MAP_TILE * W + (size_t)c * MAP_TILE, MAP_TILE, MAP_TILE, (int)W); free(px); tiles++;
     }
-    if (img && layer == 2) depths_grey(img, W * H);
-    fprintf(stderr, "[bottom] map: layer %c, %d tiles\n", pre[layer], tiles);
-    atomic_store(&g_mapimg[layer], img);
+    if (img && layer == 2) depths_tint(img, W * H);
+    fprintf(stderr, "[bottom] map: layer %c, %d tiles, revealed %04x\n", pre[layer], tiles, (unsigned)reveal);
+    atomic_store(&g_map_made[layer], reveal);   /* before the picture: the drawing thread reads it after taking one */
+    free(atomic_exchange(&g_mapimg_new[layer], img));   /* one not taken yet is out of date */
+    atomic_store(&g_map_building[layer], 0);
     bottom_redraw();
     return NULL;
 }
-static const uint32_t *map_image(int layer) {   /* NULL while it is being made (a thread; the tab redraws when done) */
-    uint32_t *m = atomic_load(&g_mapimg[layer]);
-    if (!m && !atomic_exchange(&g_map_building[layer], 1)) { pthread_t th; if (!pthread_create(&th, NULL, map_build, (void *)(intptr_t)layer)) pthread_detach(th); }
-    return m;
+static const uint32_t *map_image(int layer) {   /* the drawing thread; NULL until the first picture is made */
+    uint32_t *n = atomic_exchange(&g_mapimg_new[layer], NULL);
+    if (n) { free(g_mapimg[layer]); g_mapimg[layer] = n; g_map_shown[layer] = atomic_load(&g_map_made[layer]); }
+    uint32_t want = layer == 2 ? 0 : map_reveal();
+    if ((!g_mapimg[layer] || g_map_shown[layer] != want) && !atomic_load(&g_mapimg_new[layer]) && !atomic_exchange(&g_map_building[layer], 1)) {
+        pthread_t th; if (!pthread_create(&th, NULL, map_build, (void *)(intptr_t)layer)) pthread_detach(th); else atomic_store(&g_map_building[layer], 0);
+    }
+    return g_mapimg[layer];
 }
 
 /* ---------- item icons: decoded on first use, kept small ---------- */
-enum { ICON_PX = 48, ICON_MAX = 1024 };
-static struct { char id[64]; uint32_t *px; } g_icons[ICON_MAX]; static int g_nicons;
-static const uint32_t *item_icon(const char *id) {   /* the drawing thread only; NULL if the game has none */
-    for (int i = 0; i < g_nicons; i++) if (!strcmp(g_icons[i].id, id)) return g_icons[i].px;
+enum { ICON_MAX = 2048 };
+static struct { char id[64]; int size; uint32_t *px; } g_icons[ICON_MAX]; static int g_nicons;
+static const uint32_t *item_icon(const char *id, int size) {   /* size x size; the drawing thread only; NULL if the game has none */
+    for (int i = 0; i < g_nicons; i++) if (g_icons[i].size == size && !strcmp(g_icons[i].id, id)) return g_icons[i].px;
     if (g_nicons == ICON_MAX) return NULL;
     char p[128]; int w, h; snprintf(p, sizeof p, "UI/Tex/Icon/%s.bntx.zs", id);
-    uint32_t *big = asset_texture(p, &w, &h), *px = big ? malloc(ICON_PX * ICON_PX * 4) : NULL;
-    if (px) asset_scale(big, w, h, px, ICON_PX, ICON_PX, ICON_PX);
+    uint32_t *big = asset_texture(p, &w, &h), *px = big ? malloc((size_t)size * size * 4) : NULL;
+    if (px) asset_scale(big, w, h, px, size, size, size);
     free(big);
-    snprintf(g_icons[g_nicons].id, sizeof g_icons[0].id, "%s", id); g_icons[g_nicons].px = px; g_nicons++;
+    snprintf(g_icons[g_nicons].id, sizeof g_icons[0].id, "%s", id); g_icons[g_nicons].size = size; g_icons[g_nicons].px = px; g_nicons++;
     return px;
 }
 static void b_image(ANativeWindow_Buffer *b, int x0, int y0, const uint32_t *px, int w, int h) {   /* alpha-blended */
@@ -158,13 +238,14 @@ static void b_image(ANativeWindow_Buffer *b, int x0, int y0, const uint32_t *px,
     }
 }
 
-/* ---------- item names: ActorMsg/PouchContent.msbt in the message archive, labels <item id>_Name ----------
+/* ---------- item names: ActorMsg/PouchContent.msbt in the message archive, labels <item id>_Name (and _Caption) ----------
    Mals/<lang>.Product.<n>.sarc.zs: English (USen) for now, <n> found by trying. MSBT: "MsgStdBn", section count at
    0xE, sections from 0x20 (magic, u32 size, 8 bytes pad, data, aligned to 16). LBL1: u32 buckets, per bucket
    {u32 count, u32 offset}, at the offset count x {u8 length, name, u32 text index}. TXT2: u32 count, u32 offsets,
    UTF-16 strings; tags (0x0E group type size + size bytes, 0x0F group type) are dropped. */
 typedef struct { char *id, *name; } item_name_t;
-static item_name_t *g_names; static int g_nnames, g_names_state;   /* the drawing thread only */
+typedef struct { item_name_t *e; int n; } msg_table;
+static msg_table g_names, g_captions; static int g_names_state;   /* the drawing thread only */
 static int name_cmp(const void *a, const void *b) { return strcmp(((const item_name_t *)a)->id, ((const item_name_t *)b)->id); }
 static char *utf16_to_utf8(const uint8_t *p, const uint8_t *end) {
     size_t cap = (size_t)(end - p) * 2 + 1, n = 0; char *o = malloc(cap); if (!o) return NULL;
@@ -183,7 +264,8 @@ static char *utf16_to_utf8(const uint8_t *p, const uint8_t *end) {
     }
     o[n] = 0; return o;
 }
-static void names_load(const uint8_t *d, size_t n) {
+/* the texts whose labels are <item id><suffix>, into t (sorted by id) */
+static void msg_load(const uint8_t *d, size_t n, const char *suffix, msg_table *t) {
     if (n < 0x20 || memcmp(d, "MsgStdBn", 8)) return;
     uint16_t nsec; memcpy(&nsec, d + 0xe, 2);
     const uint8_t *lbl = NULL, *txt = NULL; uint32_t lsz = 0, tsz = 0; size_t o = 0x20;
@@ -195,37 +277,42 @@ static void names_load(const uint8_t *d, size_t n) {
     if (!lbl || !txt || lsz < 4 || tsz < 4) return;
     uint32_t nb, nt; memcpy(&nb, lbl, 4); memcpy(&nt, txt, 4);
     if ((size_t)4 + (size_t)nb * 8 > lsz || (size_t)4 + (size_t)nt * 4 > tsz) return;
-    int cap = 0;
+    int cap = 0; size_t sl = strlen(suffix);
     for (uint32_t b = 0; b < nb; b++) {
         uint32_t cnt, off; memcpy(&cnt, lbl + 4 + b * 8, 4); memcpy(&off, lbl + 8 + b * 8, 4);
         for (uint32_t k = 0, p = off; k < cnt && p < lsz; k++) {
             unsigned l = lbl[p]; if (p + 1 + l + 4 > lsz) break;
             uint32_t ti; memcpy(&ti, lbl + p + 1 + l, 4);
-            if (l > 5 && !memcmp(lbl + p + 1 + l - 5, "_Name", 5) && ti < nt) {
+            if (l > sl && !memcmp(lbl + p + 1 + l - sl, suffix, sl) && ti < nt) {
                 uint32_t a, z; memcpy(&a, txt + 4 + ti * 4, 4); z = tsz; if (ti + 1 < nt) memcpy(&z, txt + 8 + ti * 4, 4);
                 if (a < z && z <= tsz) {
-                    if (g_nnames == cap) { cap = cap ? cap * 2 : 1024; item_name_t *g = realloc(g_names, (size_t)cap * sizeof *g); if (!g) return; g_names = g; }
-                    char *id = strndup((const char *)lbl + p + 1, l - 5), *nm = utf16_to_utf8(txt + a, txt + z);
-                    if (id && nm) { g_names[g_nnames].id = id; g_names[g_nnames].name = nm; g_nnames++; } else { free(id); free(nm); }
+                    if (t->n == cap) { cap = cap ? cap * 2 : 1024; item_name_t *g = realloc(t->e, (size_t)cap * sizeof *g); if (!g) break; t->e = g; }
+                    char *id = strndup((const char *)lbl + p + 1, l - sl), *nm = utf16_to_utf8(txt + a, txt + z);
+                    if (id && nm) { t->e[t->n].id = id; t->e[t->n].name = nm; t->n++; } else { free(id); free(nm); }
                 }
             }
             p += 1 + l + 4;
         }
     }
-    qsort(g_names, (size_t)g_nnames, sizeof *g_names, name_cmp);
+    if (t->n) qsort(t->e, (size_t)t->n, sizeof *t->e, name_cmp);
 }
-static const char *item_name(const char *id) {   /* the game's name for an item id, or the id */
+static void names_init(void) {   /* names and captions (the game's descriptions), on first use */
     if (!g_names_state) {
         g_names_state = -1;
         pthread_mutex_lock(&g_asset_mu); int ok = zs_init(); pthread_mutex_unlock(&g_asset_mu);
         char p[96]; size_t zn = 0, n = 0, mn = 0; uint8_t *z = NULL; const uint8_t *msbt;
         for (int v = 160; ok && v >= 100 && !z; v--) { snprintf(p, sizeof p, "Mals/USen.Product.%d.sarc.zs", v); z = rom_read(p, &zn); }
         uint8_t *sarc = z ? zs_decompress(z, zn, g_zsdict, &n) : NULL; free(z);
-        if (sarc && sarc_find(sarc, n, "ActorMsg/PouchContent.msbt", &msbt, &mn)) names_load(msbt, mn);
+        if (sarc && sarc_find(sarc, n, "ActorMsg/PouchContent.msbt", &msbt, &mn)) { msg_load(msbt, mn, "_Name", &g_names); msg_load(msbt, mn, "_Caption", &g_captions); }
         free(sarc);
-        if (g_nnames) g_names_state = 1;
-        fprintf(stderr, "[bottom] item names: %d from %s\n", g_nnames, z || sarc ? p : "(no message archive)");
+        if (g_names.n) g_names_state = 1;
+        fprintf(stderr, "[bottom] item names: %d, captions %d from %s\n", g_names.n, g_captions.n, z || sarc ? p : "(no message archive)");
     }
-    item_name_t key = {(char *)id, NULL}, *f = g_nnames ? bsearch(&key, g_names, (size_t)g_nnames, sizeof *g_names, name_cmp) : NULL;
-    return f ? f->name : id;
 }
+static const char *msg_find(const msg_table *t, const char *id) {
+    names_init();
+    item_name_t key = {(char *)id, NULL}, *f = t->n ? bsearch(&key, t->e, (size_t)t->n, sizeof *t->e, name_cmp) : NULL;
+    return f ? f->name : NULL;
+}
+static const char *item_name(const char *id) { const char *s = msg_find(&g_names, id); return s ? s : id; }   /* the game's name, or the id */
+static const char *item_caption(const char *id) { return msg_find(&g_captions, id); }   /* its description; NULL if none */

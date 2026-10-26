@@ -244,6 +244,21 @@ static void b_text(ANativeWindow_Buffer *b, int x, int baseline, const char *s, 
         x += g->adv;
     }
 }
+/* text in lines no wider than w, broken at spaces (the game's own line breaks are spaces here: the box differs); lines
+   below y_max are left out. Returns the baseline after the last line drawn. */
+static int b_wrap(ANativeWindow_Buffer *b, int x, int baseline, int w, const char *s, int size, uint32_t c, int line_h, int y_max) {
+    char line[512]; size_t n = 0;
+    while (*s && baseline <= y_max) {
+        const char *e = s; while (*e && *e != ' ' && *e != '\n') e++;   /* the next word */
+        size_t wl = (size_t)(e - s); if (wl > sizeof line - 2) wl = sizeof line - 2;
+        char trial[512]; snprintf(trial, sizeof trial, "%.*s%s%.*s", (int)n, line, n ? " " : "", (int)wl, s);
+        if (n && text_width(trial, size) > w) { b_text(b, x, baseline, line, size, c); baseline += line_h; n = 0; continue; }
+        n = strlen(trial); memcpy(line, trial, n + 1);
+        s = *e ? e + 1 : e;
+    }
+    if (n && baseline <= y_max) { b_text(b, x, baseline, line, size, c); baseline += line_h; }
+    return baseline;
+}
 static void b_blend(ANativeWindow_Buffer *b, int x0, int y0, int x1, int y1, uint32_t c, unsigned a) {   /* a: 0..255 */
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > b->width) x1 = b->width; if (y1 > b->height) y1 = b->height;
     for (int y = y0; y < y1; y++) {

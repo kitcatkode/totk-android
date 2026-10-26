@@ -1,5 +1,6 @@
 /* The bottom screen's Map tab (android/BOTTOM_SCREEN.md steps A and C; 2026-10-23): the game's map under Link's
-   marker, with pinch zoom, drag to pan, double-tap to zoom in, and "Whole map" / "Follow Link" buttons. Included by
+   marker, with pinch zoom, drag to pan, double-tap to zoom in, and "Reveal all" / "Whole map" / "Follow Link" buttons.
+   What is revealed follows the newest save's Skyview Towers (bottom_assets.c, map_reveal); "Reveal all" shows it all. Included by
    bottom_screen.c after bottom_assets.c.
 
    World x -6000..6000 (east), z -5000..5000 (south); north up; tile (c, r) covers x -6000+1000c, z -5000+1000r, 1000
@@ -37,7 +38,7 @@ static void map_pan(float dx, float dy) {
 
 /* ---------- detailed tiles: a cache filled by one thread ---------- */
 enum { MAP_SLOTS = 48 }; static const size_t MAP_CACHE_BYTES = 80u << 20;
-typedef struct { int layer, li, c, r, state; uint32_t *px; int w, h; uint64_t used; } map_slot;   /* state 1 wanted, 2 ready, 3 missing */
+typedef struct { int layer, li, c, r, state; uint32_t reveal, *px; int w, h; uint64_t used; } map_slot;   /* state 1 wanted, 2 ready, 3 missing */
 static map_slot g_ms[MAP_SLOTS]; static pthread_mutex_t g_ms_mu = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_ms_cv = PTHREAD_COND_INITIALIZER;
 static uint64_t g_ms_tick; static int g_ms_thread;
 static void *map_tiles_thread(void *arg) {
@@ -51,17 +52,17 @@ static void *map_tiles_thread(void *arg) {
             pthread_cond_wait(&g_ms_cv, &g_ms_mu);
         }
         map_slot want = *job; pthread_mutex_unlock(&g_ms_mu);
-        char p[128]; int w = 0, h = 0; uint32_t *px = NULL;
-        const char *suffix = map_tile_suffix(want.layer, want.c, want.r);
+        char p[128], sb[12]; int w = 0, h = 0; uint32_t *px = NULL;
+        const char *suffix = map_tile_suffix(want.layer, want.c, want.r, want.reveal, sb);
         if (suffix) { snprintf(p, sizeof p, "UI/Map/MainField/%c_%02d-%02d_%02d%s.bntx.zs", "GSU"[want.layer], want.c, want.r, g_map_lv[want.li].level, suffix); px = asset_texture(p, &w, &h); }
         if (px && w > MAP_MAX_PX_TILE) {   /* level 00: kept at half size */
             uint32_t *s = malloc((size_t)MAP_MAX_PX_TILE * MAP_MAX_PX_TILE * 4);
             if (s) asset_scale(px, w, h, s, MAP_MAX_PX_TILE, MAP_MAX_PX_TILE, MAP_MAX_PX_TILE);
             free(px); px = s; w = h = MAP_MAX_PX_TILE;
         }
-        if (px && want.layer == 2) depths_grey(px, (size_t)w * h);
+        if (px && want.layer == 2) depths_tint(px, (size_t)w * h);
         pthread_mutex_lock(&g_ms_mu);
-        if (job->state == 1 && job->layer == want.layer && job->li == want.li && job->c == want.c && job->r == want.r) { job->px = px; job->w = w; job->h = h; job->state = px ? 2 : 3; px = NULL; }
+        if (job->state == 1 && job->layer == want.layer && job->li == want.li && job->c == want.c && job->r == want.r && job->reveal == want.reveal) { job->px = px; job->w = w; job->h = h; job->state = px ? 2 : 3; px = NULL; }
         size_t total = 0; for (int i = 0; i < MAP_SLOTS; i++) if (g_ms[i].px) total += (size_t)g_ms[i].w * g_ms[i].h * 4;
         while (total > MAP_CACHE_BYTES) {   /* the least recently drawn go */
             map_slot *old = NULL; for (int i = 0; i < MAP_SLOTS; i++) if (g_ms[i].px && (!old || g_ms[i].used < old->used)) old = &g_ms[i];
@@ -75,18 +76,18 @@ static void *map_tiles_thread(void *arg) {
     return NULL;
 }
 /* the tile if decoded (copied out under the lock: pointer, size); else it is asked for and NULL */
-static const uint32_t *map_tile(int layer, int li, int c, int r, int *w, int *h) {
+static const uint32_t *map_tile(int layer, int li, int c, int r, uint32_t reveal, int *w, int *h) {
     pthread_mutex_lock(&g_ms_mu);
     if (!g_ms_thread) { g_ms_thread = 1; pthread_t th; if (!pthread_create(&th, NULL, map_tiles_thread, NULL)) pthread_detach(th); }
     map_slot *s = NULL, *free_s = NULL, *old = NULL;
     for (int i = 0; i < MAP_SLOTS; i++) {
         map_slot *m = &g_ms[i];
-        if (m->state && m->layer == layer && m->li == li && m->c == c && m->r == r) { s = m; break; }
+        if (m->state && m->layer == layer && m->li == li && m->c == c && m->r == r && m->reveal == reveal) { s = m; break; }
         if (!m->state) { if (!free_s) free_s = m; } else if (m->state != 2 && (!old || m->used < old->used)) old = m;
     }
     if (!s && !free_s && !old)   /* every slot holds a decoded tile: the least recently drawn one not drawn now goes */
         for (int i = 0; i < MAP_SLOTS; i++) if (g_ms[i].used != g_ms_tick && (!old || g_ms[i].used < old->used)) old = &g_ms[i];
-    if (!s && (s = free_s ? free_s : old)) { free(s->px); *s = (map_slot){layer, li, c, r, 1, NULL, 0, 0, 0}; pthread_cond_signal(&g_ms_cv); }
+    if (!s && (s = free_s ? free_s : old)) { free(s->px); *s = (map_slot){layer, li, c, r, 1, reveal, NULL, 0, 0, 0}; pthread_cond_signal(&g_ms_cv); }
     const uint32_t *px = NULL;
     if (s) { s->used = g_ms_tick; if (s->state == 2) { px = s->px; *w = s->w; *h = s->h; } }
     pthread_mutex_unlock(&g_ms_mu);
@@ -94,7 +95,15 @@ static const uint32_t *map_tile(int layer, int li, int c, int r, int *w, int *h)
 }
 
 /* ---------- drawing ---------- */
+static void inv_load(void);   /* bottom_inventory.c: the newest save, with the towers (g_reveal) */
+static const char *g_map_bt[3] = {"Reveal all", "Whole map", "Follow Link"};   /* the bar's buttons, right to left from the last */
+static int map_button(float x, int width) {   /* which button x is on (-1: none), laid out as map_draw does */
+    int bx = width - PAD;
+    for (int i = 2; i >= 0; i--) { int w = text_width(g_map_bt[i], 30) + 40; if (x >= bx - w && x < bx) return i; bx -= w + 12; }
+    return -1;
+}
 static void map_draw(ANativeWindow_Buffer *b) {
+    { static double last; double now = since_boot(); if (now - last > 2) { last = now; inv_load(); } }
     g_mrect.x0 = PAD; g_mrect.y0 = ROW_Y0; g_mrect.x1 = b->width - PAD; g_mrect.y1 = b->height - MAP_BAR;
     float p[3], yaw; char line[128]; int have = runtime_player_pose(p, &yaw);
     int layer = !have ? 0 : p[1] < -100 ? 2 : p[1] > 1000 ? 1 : 0;   /* ground, sky, Depths */
@@ -117,7 +126,7 @@ static void map_draw(ANativeWindow_Buffer *b) {
         int x0 = (int)fmaxf(tx0, vx0), y0 = (int)fmaxf(ty0, vy0), x1 = (int)fminf(tx0 + tile_px, vx1), y1 = (int)fminf(ty0 + tile_px, vy1);
         if (x0 >= x1 || y0 >= y1) continue;
         const uint32_t *src = NULL; int sw = 0, sh = 0, stride = 0;
-        if (li >= 0 && img) { src = map_tile(layer, li, c, r, &sw, &sh); stride = sw; }
+        if (li >= 0 && img) { src = map_tile(layer, li, c, r, layer == 2 ? 0 : map_reveal(), &sw, &sh); stride = sw; }
         if (!src && img) { src = img + (size_t)r * MAP_TILE * (MAP_COLS * MAP_TILE) + (size_t)c * MAP_TILE; sw = sh = MAP_TILE; stride = MAP_COLS * MAP_TILE; }
         if (!src) continue;
         for (int y = y0; y < y1; y++) {
@@ -137,12 +146,12 @@ static void map_draw(ANativeWindow_Buffer *b) {
         b_tri(b, (float[]){cx, cx + sx * 12, cx}, (float[]){cy, cy, cy + sy * 12}, g_col[C_BG]);
     }
     b_panel(b, vx0 - 4, vy0 - 4, vx1 + 4, vy1 + 4, 10, 0, g_col[C_EDGE]);
-    const char *bt[2] = {"Whole map", "Follow Link"}; int bx = b->width - PAD;
-    for (int i = 1; i >= 0; i--) {
-        int w = text_width(bt[i], 30) + 40, on = i == 1 && follow; bx -= w;
+    int bx = b->width - PAD;
+    for (int i = 2; i >= 0; i--) {
+        const char *bt = g_map_bt[i]; int w = text_width(bt, 30) + 40, on = i == 2 ? follow : i == 0 && atomic_load(&g_reveal_all); bx -= w;
         b_panel(b, bx, vy1 + 14, bx + w, b->height - 8, 8, on ? g_col[C_TABOFF] : g_col[C_PILL], on ? g_col[C_TAB] : g_col[C_EDGE]);
         if (on) b_cursor(b, bx, vy1 + 14, bx + w, b->height - 8, g_col[C_TAB]);
-        b_text(b, bx + 20, b->height - 22, bt[i], 30, on ? g_col[C_TEXT] : g_col[C_DIM]); bx -= 12;
+        b_text(b, bx + 20, b->height - 22, bt, 30, on ? g_col[C_TEXT] : g_col[C_DIM]); bx -= 12;
     }
     if (!have) { b_text(b, PAD, b->height - 22, "Link isn't in the world right now", 30, g_col[C_DIM]); return; }
     float lx = SX(p[0]), ly = SY(p[2]), fx = sinf(yaw), fz = cosf(yaw);   /* forward on the map: (x, z) */
@@ -164,10 +173,12 @@ static void map_draw(ANativeWindow_Buffer *b) {
 
 /* ---------- touch (the activity's thread) ---------- */
 static void map_tap(float x, float y, int width, int height) {
-    if (y >= height - MAP_BAR) {   /* the buttons, laid out as map_draw does */
-        int bx = width - PAD, w1 = text_width("Follow Link", 30) + 40, w0 = text_width("Whole map", 30) + 40;
-        if (x >= bx - w1 && x < bx) { pthread_mutex_lock(&g_mv_mu); g_mv.follow = 1; pthread_mutex_unlock(&g_mv_mu); bottom_redraw(); }
-        else if (x >= bx - w1 - 12 - w0 && x < bx - w1 - 12) { pthread_mutex_lock(&g_mv_mu); g_mv.follow = 0; g_mv.ppu = 0; map_clamp(); pthread_mutex_unlock(&g_mv_mu); bottom_redraw(); }
+    if (y >= height - MAP_BAR) {
+        int i = map_button(x, width);
+        if (i == 2) { pthread_mutex_lock(&g_mv_mu); g_mv.follow = 1; pthread_mutex_unlock(&g_mv_mu); }
+        else if (i == 1) { pthread_mutex_lock(&g_mv_mu); g_mv.follow = 0; g_mv.ppu = 0; map_clamp(); pthread_mutex_unlock(&g_mv_mu); }
+        else if (i == 0) atomic_fetch_xor(&g_reveal_all, 1);
+        if (i >= 0) bottom_redraw();
         return;
     }
     static double last; static float lx, ly; double now = since_boot();
