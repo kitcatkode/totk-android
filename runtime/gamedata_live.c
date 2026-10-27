@@ -17,6 +17,7 @@
 #include <string.h>
 
 int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max);
+int runtime_gmd_where(uint32_t hash, unsigned type, uint64_t *array, unsigned *element);
 
 #if defined(TOTK_GAME_V143) && !defined(GAME_BOTW)
 enum { GMD_SLOT = 0x3ad66b0, GMD_VTABLE = 0x39403b0, GMD_TYPE_VTABLE = 0x39403d0, GMD_TYPE_SIZE = 0x60, GMD_TYPE_STEP = 0xa0 };
@@ -26,9 +27,8 @@ static const struct { unsigned type, size, vtable, element; } g_kind[] = {
 };
 static uint64_t rd(uint64_t a) { uint64_t v = 0; return a && host_safe_read(a, &v, 8) ? v : 0; }
 
-/* copies up to max elements of the array with this key hash (IntArray: int32 each; String64Array: 64-byte texts),
-   returns the array's length (its slots, empty ones included) or -1 */
-int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max) {
+/* where the live array with this key hash is: its length (or -1), the array and its element size */
+int runtime_gmd_where(uint32_t hash, unsigned type, uint64_t *array, unsigned *element) {
     unsigned k = 0; while (k < sizeof g_kind / sizeof *g_kind && g_kind[k].type != type) k++;
     if (k == sizeof g_kind / sizeof *g_kind || !hash) return -1;
     uint64_t game = (uintptr_t)runtime_module_base("main"); if (!game) return -1;
@@ -48,7 +48,15 @@ int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max) {
     if (rd(v) != game + g_kind[k].vtable) return -1;
     uint32_t len; uint64_t arr = rd(v + g_kind[k].size - 0x18);
     if (!host_safe_read(v + g_kind[k].size - 0x20, &len, 4) || !arr || len > 4096) return -1;
-    uint32_t m = len < max ? len : max, el = g_kind[k].element;
+    *array = arr; *element = g_kind[k].element;
+    return (int)len;
+}
+/* copies up to max elements of the array with this key hash (IntArray: int32 each; String64Array: 64-byte texts),
+   returns the array's length (its slots, empty ones included) or -1 */
+int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max) {
+    uint64_t arr; unsigned el; int got = runtime_gmd_where(hash, type, &arr, &el);
+    if (got < 0) return -1;
+    uint32_t len = (uint32_t)got, m = len < max ? len : max;
     if (!m) return (int)len;
     if (type == 3) return host_safe_read(arr, out, (size_t)m * el) ? (int)len : -1;
     uint8_t *raw = malloc((size_t)m * el); if (!raw) return -1;
@@ -58,5 +66,6 @@ int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max) {
     return ok ? (int)len : -1;
 }
 #else
+int runtime_gmd_where(uint32_t hash, unsigned type, uint64_t *array, unsigned *element) { (void)hash; (void)type; (void)array; (void)element; return -1; }
 int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max) { (void)hash; (void)type; (void)out; (void)max; return -1; }
 #endif

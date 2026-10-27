@@ -463,6 +463,7 @@ static void crash(int num,siginfo_t *info,void *context) {
   if((insn&~31u)==0xd50b7e20u){uintptr_t a=rt==31?0:(uintptr_t)UC_X(u)[rt];host_dcache_flush((void *)(a&~(uintptr_t)127),128);UC_PC(u)+=4;return;}   /* dc civac, Xt */
  }
  if((num==SIGBUS||num==SIGSEGV)&&runtime_fault_guard){sigjmp_buf *g=runtime_fault_guard;runtime_fault_guard=NULL;siglongjmp(*g,1);}   /* guarded host read of guest memory (uniform snapshot copies) */
+ if(num==SIGSEGV&&runtime_mem_watch_fault(info->si_addr,context))return;   /* memwatch (mem_scan.c, diagnostic) */
  if(runtime_gfx_fault(info->si_addr,(host_uc_esr(u)>>6)&1,context))return;uint64_t pc=UC_PC(u),fp=UC_FP(u);
  signal_hex("[totk] signal=",num);signal_hex("fault=",(uintptr_t)info->si_addr);signal_hex("esr=",host_uc_esr(u));
  {uint64_t ra=0,rs=0,rp=0;
