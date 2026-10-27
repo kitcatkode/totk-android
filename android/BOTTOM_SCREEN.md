@@ -156,8 +156,20 @@ Item ids are actor names (`Weapon_Sword_001`, `Item_Fruit_A`, ...); empty slots 
 | E | Inventory icons | the icon files from B |
 | F | Inventory live from memory (no save lag) | done 2026-10-26 (gamedata_live.c, 1.4.3) |
 | G | Map extras: stamps from GameData, the revealed / unexplored state | GameData keys |
+| H | Equip weapons / shields from the Inventory tab | done 2026-10-26 (through the game's quick menu) |
 
 A and D can start now; C and E wait on B (minutes of play with one setting on).
+
+**Equipping (step H, 2026-10-26).** The Inventory tab's detail panel has an Equip button on Weapons and Shields while
+the pouches are live. It equips through the game's own quick menu: hold the D-pad direction (right weapons, left
+shields), flick the right stick once per slot from the equipped one (`Pouch.<key>.EquipIndex[0]`; from "none" the
+menu starts at slot 0), let go; then it reads the equipped slot back and walks the difference again, up to three tries.
+Verified on the Thor for weapons, forwards and backwards. The game equips nothing for an item at durability 0 (the
+Decayed Master Sword recharging) - choosing it unequips - so its button is off. Not done: bows (ZR + D-pad right, and
+letting go of ZR shoots), holding materials (the + menu). Calling the game's equip function directly was tried first:
+`memwatch` (mem_scan.c) shows the equip index is written by the generic GameData setter from a per-frame flush of
+queued writes (main+0x3e59a4 -> 0x3e5dfc -> 0x74240), so the caller that queued it is not on that stack; lotuskit has
+no equip symbols either.
 
 **Done (2026-10-23):** A: `runtime_player_pose` (world_survey.c, read-only, any thread) and the Map tab's grid with
 Link's marker, layer and coordinates, redrawn 10 times a second (heading sign still to confirm in play). D, first

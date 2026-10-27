@@ -32,10 +32,11 @@ static const struct { const char *tab, *key; inv_value v; } g_pouch[INV_POUCHES]
     {"Arrows", "Arrow", V_STOCK}, {"Materials", "Material", V_STOCK}, {"Food", "Food", V_STOCK},
     {"Devices", "SpecialParts", V_STOCK}, {"Key items", "KeyItem", V_STOCK},
 };
-typedef struct { char name[64], fuse[64]; int value; } inv_item;
+typedef struct { char name[64], fuse[64]; int value, slot; } inv_item;   /* slot: its place in the pouch's array */
 static struct { inv_item *it; int n; } g_inv[INV_POUCHES];
 static char g_inv_path[1700]; static time_t g_inv_time; static int g_inv_state;   /* 0 not read, 1 read, -1 no save */
 static int g_inv_live;   /* the pouches shown are the running game's (else the save's) */
+static int g_inv_equip[INV_POUCHES];   /* live: the equipped item's slot (Pouch.<key>.EquipIndex[0]), -1 none */
 static int g_inv_tab, g_inv_scroll[INV_POUCHES];
 
 typedef struct { const uint8_t *b; size_t n; uint32_t doff; } sav;
@@ -100,7 +101,7 @@ static int inv_load_save(void) {   /* 1 when the pouches were replaced by a newe
         for (uint32_t i = 0; i < nn; i++) {
             const char *nm = (const char *)names + i * 64; if (!nm[0]) continue;
             inv_item *x = &it[p][cnt[p]++];
-            memcpy(x->name, nm, 63);
+            memcpy(x->name, nm, 63); x->slot = (int)i;
             if (vals && i < nv) memcpy(&x->value, vals + i * 4, 4); else x->value = INT32_MIN;
             if (fuse && i < nf) memcpy(x->fuse, fuse + i * 64, 63);
         }
@@ -119,6 +120,46 @@ static int inv_load_save(void) {   /* 1 when the pouches were replaced by a newe
     return 1;
 }
 int runtime_gmd_array(uint32_t hash, unsigned type, void *out, unsigned max);   /* gamedata_live.c */
+static int equip_index(int p) {   /* the running game's equipped slot of this pouch, -1 none or unknown */
+    char k[96]; int32_t v[2] = {-1, -1}; snprintf(k, sizeof k, "Pouch.%s.EquipIndex", g_pouch[p].key);
+    return runtime_gmd_array(mm3(k), 3, v, 2) >= 1 ? v[0] : -1;
+}
+
+/* Equipping from the bottom screen, through the game's own quick menu (verified on the Thor for weapons, 2026-10-26):
+   hold the D-pad direction, flick the right stick once per slot, let go; the game equips on release. The equipped slot
+   is then read back and the difference walked again, up to three tries, since the menu may skip slots the pouch keeps.
+   Weapons: D-pad right; shields: D-pad left (same menu, not yet tried with two shields). Bows are ZR + D-pad right, and
+   letting go of ZR shoots: not done. The keys are input.c's (4 / 3 the D-pad, 123 / 124 the right stick). */
+void runtime_input_key_synthetic(unsigned code, int down);
+enum { EQ_IDLE, EQ_BUSY, EQ_FAILED };
+static _Atomic int g_eq_state, g_eq_reread;   /* reread: an equip finished, read the pouches at the next draw */
+static int g_eq_pouch, g_eq_slot;
+static int equip_pad(int p) { return p == 0 ? 4 : p == 2 ? 3 : 0; }   /* the D-pad key of a pouch's quick menu, 0 none */
+static void *equip_thread(void *arg) {
+    (void)arg; int p = g_eq_pouch, want = g_eq_slot, pad = equip_pad(p), now = -1;
+    for (int tries = 0; tries < 3; tries++) {
+        if ((now = equip_index(p)) == want) break;
+        int steps = want - (now < 0 ? 0 : now), stick = steps > 0 ? 124 : 123;
+        if (steps < 0) steps = -steps;
+        fprintf(stderr, "[bottom] equip %s slot %d: from %d, %d flicks\n", g_pouch[p].key, want, now, steps);
+        runtime_input_key_synthetic(pad, 1); usleep(600000);   /* the menu opens */
+        for (int i = 0; i < steps; i++) { runtime_input_key_synthetic(stick, 1); usleep(120000); runtime_input_key_synthetic(stick, 0); usleep(120000); }
+        usleep(200000); runtime_input_key_synthetic(pad, 0);
+        usleep(800000);   /* the equip, then the GameData flush */
+    }
+    now = equip_index(p);
+    fprintf(stderr, "[bottom] equip %s slot %d: %s (now %d)\n", g_pouch[p].key, want, now == want ? "done" : "failed", now);
+    atomic_store(&g_eq_state, now == want ? EQ_IDLE : EQ_FAILED);
+    atomic_store(&g_eq_reread, 1); bottom_redraw();
+    return NULL;
+}
+static void equip_start(int p, int slot) {
+    int idle = EQ_IDLE, failed = EQ_FAILED;
+    if (!atomic_compare_exchange_strong(&g_eq_state, &idle, EQ_BUSY) && !atomic_compare_exchange_strong(&g_eq_state, &failed, EQ_BUSY)) return;
+    g_eq_pouch = p; g_eq_slot = slot;
+    pthread_t t; if (pthread_create(&t, NULL, equip_thread, NULL)) { atomic_store(&g_eq_state, EQ_IDLE); return; }
+    pthread_detach(t);
+}
 static int inv_live(void) {   /* the running game's pouches: 1 when read and not all empty */
     enum { MAXS = 1024 };
     static char names[MAXS][64], fuse[MAXS][64]; static int32_t vals[MAXS];
@@ -138,20 +179,20 @@ static int inv_live(void) {   /* the running game's pouches: 1 when read and not
         for (int i = 0; it[p] && i < nn; i++) {
             if (!names[i][0]) continue;
             inv_item *x = &it[p][cnt[p]++];
-            memcpy(x->name, names[i], 63);
+            memcpy(x->name, names[i], 63); x->slot = i;
             x->value = i < nv && i < MAXS ? vals[i] : INT32_MIN;
             if (i < nf && i < MAXS) memcpy(x->fuse, fuse[i], 63);
         }
         total += cnt[p];
     }
     if (!ok || !total) { for (int p = 0; p < INV_POUCHES; p++) free(it[p]); return 0; }
-    for (int p = 0; p < INV_POUCHES; p++) { free(g_inv[p].it); g_inv[p].it = it[p]; g_inv[p].n = cnt[p]; }
+    for (int p = 0; p < INV_POUCHES; p++) { free(g_inv[p].it); g_inv[p].it = it[p]; g_inv[p].n = cnt[p]; g_inv_equip[p] = equip_index(p); }
     return 1;
 }
 static void inv_load(void) {   /* the bottom screen's thread: draws only, so no lock */
     static double last; double now = since_boot();
     int from_save = inv_load_save();   /* the towers come from it either way */
-    if (!from_save && now - last < 1) return;
+    if (!from_save && now - last < 1 && !atomic_exchange(&g_eq_reread, 0)) return;
     last = now;
     int live = inv_live();
     if (live != g_inv_live) fprintf(stderr, "[bottom] inventory: %s\n", live ? "the running game's pouches" : "the newest save's pouches");
@@ -168,9 +209,21 @@ enum { INV_CHIP_Y = ROW_Y0, INV_CHIP_H = 64, INV_LIST_Y = INV_CHIP_Y + INV_CHIP_
 static int g_inv_sel[INV_POUCHES];   /* the picked item per pouch */
 static int inv_rows_visible(int height) { return (height - INV_FOOT - INV_LIST_Y) / INV_TILE; }
 static int inv_max_scroll(int p, int height) { int rows = (g_inv[p].n + INV_COLS - 1) / INV_COLS - inv_rows_visible(height); return rows > 0 ? rows : 0; }
+static int g_eq_bt[4], g_eq_bt_on;   /* the Equip button's box (x0, y0, x1, y1), when shown */
 static void inv_detail(ANativeWindow_Buffer *b, int p, const inv_item *x, int x0, int y0, int x1, int y1) {
     b_panel(b, x0, y0, x1, y1, 14, g_col[C_ROW], g_col[C_EDGE]);
+    g_eq_bt_on = 0;
     if (!x) return;
+    if (g_inv_live && equip_pad(p)) {   /* the Equip button, at the panel's foot */
+        int bx0 = x0 + 26, by0 = y1 - 86, bx1 = x1 - 26, by1 = y1 - 24, on = x->slot == g_inv_equip[p], st = atomic_load(&g_eq_state);
+        int spent = x->value == 0;   /* the game does not equip it (the Decayed Master Sword recharging): picking it unequips */
+        const char *t = on ? "Equipped" : spent ? "Can't equip yet" : st == EQ_BUSY ? "Equipping..." : st == EQ_FAILED && g_eq_slot == x->slot && g_eq_pouch == p ? "Didn't equip - try again" : "Equip";
+        int lit = !on && !spent && st != EQ_BUSY;
+        b_panel(b, bx0, by0, bx1, by1, 10, lit ? g_col[C_TABOFF] : g_col[C_SLOT], lit ? g_col[C_TAB] : g_col[C_EDGE]);
+        b_text(b, (bx0 + bx1 - text_width(t, 30)) / 2, by1 - 20, t, 30, on ? g_col[C_ACCENT] : lit ? g_col[C_TEXT] : g_col[C_DIM]);
+        if (lit) { g_eq_bt[0] = bx0; g_eq_bt[1] = by0; g_eq_bt[2] = bx1; g_eq_bt[3] = by1; g_eq_bt_on = 1; }
+        y1 = by0 - 8;   /* the text stops above it */
+    }
     int cx = (x0 + x1) / 2, iy = y0 + 22;
     b_panel(b, cx - INV_BIG / 2 - 16, iy - 8, cx + INV_BIG / 2 + 16, iy + INV_BIG + 8, 16, g_col[C_SLOT], g_col[C_EDGE]);   /* the icon's slot */
     const uint32_t *ic = item_icon(x->name, INV_BIG); if (ic) b_image(b, cx - INV_BIG / 2, iy, ic, INV_BIG, INV_BIG);
@@ -224,6 +277,7 @@ static void inv_draw(ANativeWindow_Buffer *b) {
             b_text(b, x1 - w - 8, y1 - 9, v, 24, g_col[C_TEXT]);
         }
         if (on) b_cursor(b, x0, y0, x1, y1, g_col[C_TAB]);
+        if (g_inv_live && x->slot == g_inv_equip[p] && equip_pad(p)) { b_diamond(b, x0 + 14, y0 + 14, 9, g_col[C_BAR]); b_diamond(b, x0 + 14, y0 + 14, 6, g_col[C_ACCENT]); }   /* equipped */
     }
     inv_detail(b, p, g_inv[p].n ? &g_inv[p].it[g_inv_sel[p]] : NULL, gx + INV_GRID_W + 12, gy + 4, b->width - PAD, gy + vis * INV_TILE - 4);
     char foot[160]; struct tm tm; localtime_r(&g_inv_time, &tm);
@@ -234,6 +288,10 @@ static void inv_draw(ANativeWindow_Buffer *b) {
     b_text(b, PAD, b->height - 20, foot, 28, g_col[C_DIM]);
 }
 static void inv_tap(float x, float y, int width) {
+    if (g_eq_bt_on && x >= g_eq_bt[0] && x < g_eq_bt[2] && y >= g_eq_bt[1] && y < g_eq_bt[3]) {
+        int p = g_inv_tab; if (g_inv_sel[p] < g_inv[p].n) { equip_start(p, g_inv[p].it[g_inv_sel[p]].slot); bottom_redraw(); }
+        return;
+    }
     if (y >= INV_CHIP_Y && y < INV_CHIP_Y + INV_CHIP_H) {
         int p = (int)((x - PAD) / ((width - 2 * PAD) / INV_POUCHES));
         if (p >= 0 && p < INV_POUCHES && p != g_inv_tab) { g_inv_tab = p; bottom_redraw(); }
