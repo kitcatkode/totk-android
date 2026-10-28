@@ -1,7 +1,8 @@
-/* The second screen (TOTK, 2026-10-23): the AYN Thor's bottom display (Android display 4, "Screen-2", 1240x1080,
-   FLAG_PRESENTATION) shows the app's own UI. The APK declares an activity-alias "<package>.Bottom" of the same
-   NativeActivity and library (android/apk/build_apk.py); the game's activity starts it on the first presentation
-   display, ANativeActivity_onCreate tells the two apart by the component name, and this file runs the alias: it draws
+/* The second screen (TOTK, 2026-10-23): the AYN Thor's bottom display (stock: Android display 4, "Screen-2",
+   1240x1080, FLAG_PRESENTATION; LineageOS: display 1, an ordinary second display) shows the app's own UI. The APK
+   declares an activity-alias "<package>.Bottom" of the same NativeActivity and library (android/apk/build_apk.py); the
+   game's activity starts it on the first presentation display (else the first other public one),
+   ANativeActivity_onCreate tells the two apart by the component name, and this file runs the alias: it draws
    into its own window (software, only when something changed, and once a second for the stats line) and takes its own
    input queue, where touch goes to the UI and every gamepad event to the game (handle_input), so the controller keeps
    working whichever screen has focus. Text: stb_truetype (third_party/stb, public domain / MIT) with the Switch's
@@ -57,12 +58,30 @@ static void bottom_launch(ANativeActivity *a) {
     /* DisplayManager.getDisplays("android.hardware.display.category.PRESENTATION")[0].getDisplayId() */
     jobject dm = (*env)->CallObjectMethod(env, act, (*env)->GetMethodID(env, ac, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;"), jstr(env, "display"));
     if (!jok(env, "getSystemService") || !dm) return;
-    jobjectArray ds = (*env)->CallObjectMethod(env, dm, (*env)->GetMethodID(env, (*env)->GetObjectClass(env, dm), "getDisplays", "(Ljava/lang/String;)[Landroid/view/Display;"),
+    jclass dmc = (*env)->GetObjectClass(env, dm);
+    jobjectArray ds = (*env)->CallObjectMethod(env, dm, (*env)->GetMethodID(env, dmc, "getDisplays", "(Ljava/lang/String;)[Landroid/view/Display;"),
                                                jstr(env, "android.hardware.display.category.PRESENTATION"));
-    if (!jok(env, "getDisplays") || !ds || (*env)->GetArrayLength(env, ds) < 1) { fprintf(stderr, "[bottom] no presentation display: no second screen\n"); return; }
-    jobject d = (*env)->GetObjectArrayElement(env, ds, 0);
-    jint id = (*env)->CallIntMethod(env, d, (*env)->GetMethodID(env, (*env)->GetObjectClass(env, d), "getDisplayId", "()I"));
-    if (!jok(env, "getDisplayId")) return;
+    if (!jok(env, "getDisplays")) return;
+    jint id = -1;
+    jclass dc = (*env)->FindClass(env, "android/view/Display");
+    jmethodID did = (*env)->GetMethodID(env, dc, "getDisplayId", "()I"), dfl = (*env)->GetMethodID(env, dc, "getFlags", "()I");
+    if (ds && (*env)->GetArrayLength(env, ds) > 0) {
+        id = (*env)->CallIntMethod(env, (*env)->GetObjectArrayElement(env, ds, 0), did);
+        if (!jok(env, "getDisplayId")) return;
+    } else {
+        /* LineageOS (odin2thor) runs the bottom panel as a full second display (id 1) without FLAG_PRESENTATION:
+           take the first other display that isn't private (Display.FLAG_PRIVATE = 4). */
+        ds = (*env)->CallObjectMethod(env, dm, (*env)->GetMethodID(env, dmc, "getDisplays", "()[Landroid/view/Display;"));
+        if (!jok(env, "getDisplays") || !ds) return;
+        for (jsize i = 0, n = (*env)->GetArrayLength(env, ds); i < n && id < 0; i++) {
+            jobject d = (*env)->GetObjectArrayElement(env, ds, i);
+            jint di = (*env)->CallIntMethod(env, d, did), fl = (*env)->CallIntMethod(env, d, dfl);
+            if (!jok(env, "Display")) return;
+            if (di != 0 && !(fl & 4)) id = di;
+        }
+        if (id < 0) { fprintf(stderr, "[bottom] no second display: no second screen\n"); return; }
+        fprintf(stderr, "[bottom] no presentation display; using display %d\n", (int)id);
+    }
     /* new Intent().setClassName(activity, package + ".Bottom").addFlags(NEW_TASK | MULTIPLE_TASK) */
     jstring pkg = (*env)->CallObjectMethod(env, act, (*env)->GetMethodID(env, ac, "getPackageName", "()Ljava/lang/String;"));
     if (!jok(env, "getPackageName")) return;
