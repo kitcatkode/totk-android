@@ -68,7 +68,9 @@ static uint32_t *asset_texture(const char *path, int *w, int *h) {
     if (!td || t < 0x2d || t > 0x3a || !tw || !th || tw > 4096 || th > 4096 || bhl > 5) { free(d); return NULL; }
     int bw = blk[t - 0x2d][0], bh = blk[t - 0x2d][1]; uint32_t wb = (tw + bw - 1) / bw, hb = (th + bh - 1) / bh, gx = (wb * 16 + 63) / 64, gh = 1u << bhl;
     const uint8_t *src = td + 0x10; size_t avail = (size_t)(d + n - src);
-    uint8_t *lin = malloc((size_t)wb * hb * 16); uint32_t *px = malloc((size_t)tw * th * 4);
+    /* + 16: the decoder reads a block's bits 4 or 8 bytes at a time, up to 3 bytes past the block (astc.cpp getbits);
+       past the last one that left the buffer, a fault where it ended at a page (zoomed map tiles on the device) */
+    uint8_t *lin = calloc((size_t)wb * hb * 16 + 16, 1); uint32_t *px = malloc((size_t)tw * th * 4);
     for (uint32_t y = 0; lin && y < hb; y++) for (uint32_t x = 0; x < wb; x++) {   /* block-linear: GOBs of 64 bytes x 8 rows */
         uint32_t xb = x * 16; size_t a = (size_t)(y / (8 * gh)) * gx * 512 * gh + (xb / 64) * 512 * gh + ((y % (8 * gh)) / 8) * 512 +
                                          ((xb % 64) / 32) * 256 + ((y % 8) / 2) * 64 + ((xb % 32) / 16) * 32 + (y % 2) * 16;
